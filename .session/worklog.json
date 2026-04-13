@@ -1,0 +1,45 @@
+{
+  "project": "ontology-mcp",
+  "objective": "Python code ontology MCP PoC with Neo4j",
+  "status": "integration_assets_added_runtime_validation_blocked",
+  "current_todo": "none",
+  "decisions": {
+    "mcp_framework": "FastMCP",
+    "language_scope": [
+      "python"
+    ],
+    "precision_mode": "high_precision",
+    "graph_db": "neo4j_env_configured",
+    "rerun_mode": "repo_scoped_reset",
+    "python_interfaces_v1": "skip"
+  },
+  "sample_repo": "/Users/bhaveshmandwani/Code/Python/INTERNSHIP/Crud_FastAPI",
+  "notes": [
+    "Use backend/**/*.py as first validation focus",
+    "Track progress in plan.md + SQL todos + this file"
+  ],
+  "completed_todos": [
+    "scaffold-fastmcp",
+    "scanner-layer",
+    "rule-parser",
+    "neo4j-writer",
+    "mcp-tool",
+    "smoke-tests",
+    "e2e-validate"
+  ],
+  "next_steps": [
+    "Install dependencies in execution environment (fastmcp, neo4j, pytest)",
+    "Set NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, optionally NEO4J_DATABASE",
+    "Run ontology-mcp-server via MCP client config",
+    "Run build_python_code_ontology with dry_run=false"
+  ],
+  "integration": {
+    "distribution_target": "python_cli_stdio",
+    "priority_clients": [
+      "Cursor",
+      "Claude Desktop",
+      "generic MCP JSON"
+    ],
+    "npm_wrapper_phase": "deferred"
+  }
+}
