@@ -20,10 +20,10 @@ class Neo4jConfig:
 
 
 def load_neo4j_config() -> Neo4jConfig:
-    uri = "neo4j+s://303ba842.databases.neo4j.io"
-    username = "303ba842"
-    password = "OdTlYVsWoQJQyTwsi2trxq_5sfHFtx0S0aGBWqLrjGQ"
-    database = "303ba842"
+    uri = os.environ.get("NEO4J_URI", "")
+    username = os.environ.get("NEO4J_USERNAME", "neo4j")
+    password = os.environ.get("NEO4J_PASSWORD", "")
+    database = os.environ.get("NEO4J_DATABASE", "neo4j")
     if uri.startswith("neo4j+s://"):
         uri = uri.replace("neo4j+s://", "neo4j+ssc://", 1)
     elif uri.startswith("bolt+s://"):
@@ -32,15 +32,22 @@ def load_neo4j_config() -> Neo4jConfig:
 
 
 def _sanitize_props(props: dict[str, Any]) -> dict[str, Any]:
+    """Keep only Neo4j-compatible scalar types; drop lists/dicts."""
     return {k: v for k, v in props.items() if v is None or isinstance(v, (str, int, float, bool))}
 
 
-def write_graph_to_neo4j(graph: OntologyGraph, repo_id: str, config: Neo4jConfig, reset_graph: bool) -> dict[str, int]:
+def write_graph_to_neo4j(
+    graph: OntologyGraph,
+    repo_id: str,
+    config: Neo4jConfig,
+    reset_graph: bool,
+) -> dict[str, int]:
     from neo4j import GraphDatabase
 
     driver = GraphDatabase.driver(config.uri, auth=(config.username, config.password))
     node_counter: Counter[str] = Counter()
     rel_counter: Counter[str] = Counter()
+
     try:
         with driver.session(database=config.database) as session:
             if reset_graph:
@@ -56,7 +63,8 @@ def write_graph_to_neo4j(graph: OntologyGraph, repo_id: str, config: Neo4jConfig
             for node in graph.nodes.values():
                 if node.type not in ALLOWED_NODE_LABELS:
                     continue
-                props = _sanitize_props(node.props)
+                # FIX: was node.props — correct field name is node.properties
+                props = _sanitize_props(node.properties)
                 session.run(
                     f"MERGE (n:{node.type} {{id: $id}}) SET n += $props",
                     id=node.id,
@@ -67,7 +75,8 @@ def write_graph_to_neo4j(graph: OntologyGraph, repo_id: str, config: Neo4jConfig
             for edge in graph.edges:
                 if edge.rel_type not in ALLOWED_REL_TYPES:
                     continue
-                props = _sanitize_props(edge.props)
+                # FIX: was edge.props — correct field name is edge.properties
+                props = _sanitize_props(edge.properties)
                 session.run(
                     f"""
                     MATCH (s {{id: $source_id}})
