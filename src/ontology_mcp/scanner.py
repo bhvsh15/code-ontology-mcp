@@ -17,19 +17,19 @@ DEFAULT_EXCLUDE_DIRS = {
     "env",
 }
 
-
+#Structured output of the scanning process, including the repo path, list of included files, and list of excluded directories
 @dataclass(frozen=True)
 class ScanResult:
     repo_path: str
     files: list[str]
     excluded_dirs: list[str]
 
-
+#Helper function to check if a given file path should be excluded based on the exclude patterns, relative to the repo root
 def _is_excluded(path: Path, repo_root: Path, exclude_globs: list[str]) -> bool:
     rel = path.relative_to(repo_root).as_posix()
     return any(fnmatch(rel, pattern) for pattern in exclude_globs)
 
-
+#Scan the given repository path for Python files 
 def scan_python_files(
     repo_path: str,
     include_globs: list[str] | None = None,
