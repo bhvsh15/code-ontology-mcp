@@ -54,13 +54,13 @@ def _read_text(path: str) -> str:
     return Path(path).read_text(encoding="utf-8", errors="replace")
 
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # AST helpers
 # ---------------------------------------------------------------------------
 
 _FUNC_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
-
+#Function to get the base name of a node (for class bases and decorator names)
 def _base_name(node: ast.expr) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -70,7 +70,7 @@ def _base_name(node: ast.expr) -> str | None:
         return _base_name(node.value)
     return None
 
-
+# Function to extract all nested statement lists from a compound statement (if/for/try/with/match)
 def _child_bodies(stmt: ast.stmt) -> list[list[ast.stmt]]:
     """All nested statement-lists inside a compound statement."""
     result: list[list[ast.stmt]] = []
@@ -87,7 +87,7 @@ def _child_bodies(stmt: ast.stmt) -> list[list[ast.stmt]]:
         result += [c.body for c in stmt.cases]
     return result
 
-
+#Function to recursively collect all ClassDef and FunctionDef/AsyncFunctionDef nodes from a list of statements,
 def _collect_class_and_func_nodes(
     body: list[ast.stmt],
 ) -> tuple[list[ast.ClassDef], list[ast.FunctionDef | ast.AsyncFunctionDef]]:
@@ -104,13 +104,14 @@ def _collect_class_and_func_nodes(
         elif isinstance(stmt, _FUNC_TYPES):
             funcs.append(stmt)
         else:
+            # Descend into any compound statements to find nested defs of class or function types
             for child in _child_bodies(stmt):
                 sc, sf = _collect_class_and_func_nodes(child)
                 classes.extend(sc)
                 funcs.extend(sf)
     return classes, funcs
 
-
+#Function to collect method definitions from a class body, including those behind compound statements
 def _collect_methods(
     class_body: list[ast.stmt],
 ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -138,6 +139,7 @@ def _collect_methods(
 # Only intra-repo imports are tracked — external libs are ignored.
 # ---------------------------------------------------------------------------
 
+#Function to build an import map for a file, mapping local names to repo-relative paths based on the AST
 def _build_import_map(
     tree: ast.Module,
     rel: str,
@@ -168,7 +170,7 @@ def _build_import_map(
 
     return import_map
 
-
+#Function to convert a dotted module name to candidate repo-relative file paths, checking for .py files and __init__.py in the repo
 def _module_to_rel_paths(module: str, file_dir: Path, repo_root: Path) -> list[str]:
     """Convert a dotted module name to candidate repo-relative file paths."""
     if not module:
@@ -195,11 +197,14 @@ def _module_to_rel_paths(module: str, file_dir: Path, repo_root: Path) -> list[s
 # Does NOT descend into nested ClassDef bodies.
 # ---------------------------------------------------------------------------
 
+# AST visitor to collect function call sites within a function/method body, capturing both bare and attribute calls.
 class _CallCollector(ast.NodeVisitor):
 
+    # Initialize with an empty list to store collected calls as (kind, name) pairs.
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
+    # Visit a Call node in the AST, extract the function being called, and store it as a (kind, name) pair in self.calls.
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
 
@@ -210,7 +215,8 @@ class _CallCollector(ast.NodeVisitor):
 
         self.generic_visit(node)
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: ARG002
+    # Override visit_ClassDef to prevent descending into nested classes, which are handled separately in the main parser logic.
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  
         pass  # do not descend into nested classes
 
 
@@ -568,8 +574,7 @@ def _process_function(
     pending_calls: list[tuple[str, dict[str, str], list[tuple[str, str]]]],
     import_map: dict[str, str],
     node_type: str = "Function",
-    outer_qualname: str = "",
-    use_has_method: bool = False,
+    outer_qualname: str = ""
 ) -> str:
     is_async = isinstance(fn_node, ast.AsyncFunctionDef)
     sep = "." if node_type == "Method" else ":"
