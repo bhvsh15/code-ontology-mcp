@@ -12,7 +12,6 @@ from ontology_mcp.model import Edge, Node, OntologyGraph
 # ---------------------------------------------------------------------------
 
 # Well-known external names that should NEVER be CALLS targets.
-# Generalised across Python frameworks — not specific to any one project.
 _EXTERNAL_CALL_NAMES: frozenset[str] = frozenset({
     # Python builtins — true for every Python project
     "print", "len", "range", "enumerate", "zip", "map", "filter",
@@ -41,9 +40,7 @@ _EXTERNAL_CALL_NAMES: frozenset[str] = frozenset({
 
 # Nested class names that are pure metadata conventions in Python — skipped
 # only when nested inside another class. Config and Meta are universal
-# conventions (Pydantic, Django, SQLAlchemy) with no standalone code value.
 _NOISE_NESTED_CLASS_NAMES: frozenset[str] = frozenset({"Config", "Meta"})
-
 
 # ---------------------------------------------------------------------------
 # Stable ID
