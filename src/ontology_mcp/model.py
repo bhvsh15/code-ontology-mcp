@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-
+#Valid types of nodes in the ontology graph
 NodeType = Literal[
     "Repository",
     "Folder",
@@ -14,6 +14,7 @@ NodeType = Literal[
     "Import",
 ]
 
+#Valid types of relationships in the ontology graph
 RelationshipType = Literal[
     "CONTAINS",
     "DEFINES",
@@ -23,7 +24,7 @@ RelationshipType = Literal[
     "CALLS",
 ]
 
-
+#Model for a node in the ontology graph
 @dataclass(frozen=True)
 class Node:
     id: str
@@ -31,6 +32,7 @@ class Node:
     properties: dict
 
 
+#Model for an edge in the ontology graph
 @dataclass(frozen=True)
 class Edge:
     source_id: str
@@ -39,6 +41,7 @@ class Edge:
     properties: dict = field(default_factory=dict)
 
 
+#Model for the ontology graph itself, Graph = (Nodes, Edges)
 @dataclass
 class OntologyGraph:
     nodes: dict[str, Node] = field(default_factory=dict)
