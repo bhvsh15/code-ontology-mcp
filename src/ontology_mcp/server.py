@@ -5,10 +5,11 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+#Git modification tool
 from ontology_mcp.git_utils import get_git_modified_files
-from ontology_mcp.tools.build_python_code_ontology import (
-    build_python_code_ontology as build_python_code_ontology_impl,
-)
+#Build and query tool implementations 
+from ontology_mcp.tools.build_python_code_ontology import (build_python_code_ontology as build_python_code_ontology_impl,)
+#Query tool implementations
 from ontology_mcp.tools.query_graph import (
     query_graph_overview as query_graph_overview_impl,
     query_folder as query_folder_impl,
