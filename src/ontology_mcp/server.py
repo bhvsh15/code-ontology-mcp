@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 from fastmcp import FastMCP
 
+from ontology_mcp.git_utils import get_git_modified_files
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -23,6 +27,55 @@ mcp = FastMCP(name="ontology-mcp")
 @mcp.tool
 def healthcheck() -> dict[str, str]:
     return {"status": "ok", "service": "ontology-mcp"}
+
+
+@mcp.tool
+def get_changed_files(repo_path: str) -> dict:
+    """
+    Return the list of files that have uncommitted changes, are staged, or
+    are untracked (excluding .gitignore'd files) in the given repository.
+
+    Args:
+        repo_path: Absolute path to a local git repository.
+
+    Returns:
+        A dict with:
+          - repo_path: the resolved path that was inspected.
+          - files:     deduplicated list of repo-relative paths.
+          - count:     number of changed files.
+          - warning:   present only when repo_path is not a git repository.
+    """
+    root = Path(repo_path).resolve()
+    files = get_git_modified_files(repo_path)
+
+    if not files:
+        # Distinguish "clean repo" from "not a git repo" for the caller.
+        is_git = False
+        if root.is_dir():
+            try:
+                subprocess.run(
+                    ["git", "rev-parse", "--git-dir"],
+                    cwd=root,
+                    capture_output=True,
+                    check=True,
+                )
+                is_git = True
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                is_git = False
+
+        if not is_git:
+            return {
+                "repo_path": str(root),
+                "files": [],
+                "count": 0,
+                "warning": f"{repo_path} is not a git repository.",
+            }
+
+    return {
+        "repo_path": str(root),
+        "files": files,
+        "count": len(files),
+    }
 
 
 # ---------------------------------------------------------------------------
