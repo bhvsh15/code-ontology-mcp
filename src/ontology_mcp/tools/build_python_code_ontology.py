@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections import Counter
 
-from ontology_mcp.neo4j_writer import load_neo4j_config, write_graph_to_neo4j
 from ontology_mcp.parser import parse_python_files
 from ontology_mcp.scanner import scan_python_files
+from ontology_mcp.sqlite_store import write_graph
 
 
 def build_python_code_ontology(
@@ -22,21 +22,13 @@ def build_python_code_ontology(
     graph = parse_python_files(repo_path=scan.repo_path, files=scan.files)
     node_counts = Counter(node.type for node in graph.nodes.values())
     rel_counts = Counter(edge.rel_type for edge in graph.edges)
-    repo_id = next(
-        node.id for node in graph.nodes.values() if node.type == "Repository"
-    )
 
     write_summary = {"nodes_written": 0, "relationships_written": 0}
-    neo4j_status = "skipped (dry_run)"
+    store_status = "skipped (dry_run)"
+
     if not dry_run:
-        config = load_neo4j_config()
-        write_summary = write_graph_to_neo4j(
-            graph=graph,
-            repo_id=repo_id,
-            config=config,
-            reset_graph=reset_graph,
-        )
-        neo4j_status = "written"
+        write_summary = write_graph(graph, repo_path=scan.repo_path, reset=reset_graph)
+        store_status = "written"
 
     return {
         "status": "completed" if not dry_run else "dry_run_completed",
@@ -49,6 +41,6 @@ def build_python_code_ontology(
         "node_counts": dict(node_counts),
         "relationship_counts": dict(rel_counts),
         "parse_warnings": graph.warnings,
-        "neo4j_status": neo4j_status,
+        "store_status": store_status,
         **write_summary,
     }

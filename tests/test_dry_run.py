@@ -42,7 +42,7 @@ def test_dry_run_builds_graph_without_neo4j(mini_repo: Path) -> None:
     result = build_python_code_ontology(repo_path=str(mini_repo), dry_run=True)
 
     assert result["status"] == "dry_run_completed"
-    assert result["neo4j_status"] == "skipped (dry_run)"
+    assert result["store_status"] == "skipped (dry_run)"
     assert result["nodes_written"] == 0
     assert result["files_scanned"] >= 2
 

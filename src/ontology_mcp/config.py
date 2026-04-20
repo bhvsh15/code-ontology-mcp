@@ -10,4 +10,5 @@ DEFAULT_EXCLUDES = [
     "dist/**",
     "build/**",
     "env/**",
+    ".ontology-mcp/**",
 ]
