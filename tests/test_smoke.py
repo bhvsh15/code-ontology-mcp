@@ -21,5 +21,5 @@ def test_ontology_tool_dry_run_returns_counts() -> None:
     )
     assert result["status"] == "dry_run_completed"
     assert result["files_scanned"] > 0
-    assert result["neo4j_status"] == "skipped (dry_run)"
+    assert result["store_status"] == "skipped (dry_run)"
     assert result["nodes_written"] == 0

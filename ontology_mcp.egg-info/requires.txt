@@ -1,0 +1,2 @@
+fastmcp>=2.0.0
+tree-sitter-language-pack>=0.3.0

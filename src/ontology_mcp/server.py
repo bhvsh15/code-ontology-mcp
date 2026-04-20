@@ -1,3 +1,26 @@
+"""
+MCP server entry point for ontology-mcp.
+
+Registers all tool functions with a FastMCP instance and exposes them over
+the Model Context Protocol so agents (Claude, Antigravity, Cursor, Codex,
+etc.) can call them directly from chat.
+
+Available tools
+---------------
+healthcheck              — confirm the server is running
+get_connection_info      — return launch command and server metadata
+get_changed_files        — list uncommitted / untracked files in a repo
+get_minimal_context      — ultra-compact graph summary (~100 tokens)
+get_review_context       — bundled review context (changed + blast radius)
+get_blast_radius         — full impact analysis for changed files
+build_python_code_ontology — scan & index a repo into local SQLite
+query_graph_overview     — node/edge counts + top-level structure
+query_folder             — subgraph for a folder
+query_file               — subgraph for a single file
+query_symbol             — symbol lookup with 1-hop neighbours
+query_call_chain         — callers / callees traversal
+"""
+
 from __future__ import annotations
 
 import subprocess
@@ -6,6 +29,10 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from ontology_mcp.git_utils import get_git_modified_files
+from ontology_mcp.tools.context_tools import (
+    get_minimal_context as get_minimal_context_impl,
+    get_review_context as get_review_context_impl,
+)
 from ontology_mcp.tools.blast_radius import get_blast_radius as get_blast_radius_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
@@ -79,6 +106,36 @@ def get_changed_files(repo_path: str) -> dict:
             }
 
     return {"repo_path": str(root), "files": files, "count": len(files)}
+
+
+# ---------------------------------------------------------------------------
+# Context tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_minimal_context(repo_path: str) -> dict:
+    """
+    Ultra-compact repo summary (~100 tokens). Call this FIRST before any
+    other tool — returns node/edge counts, top folders, and hotspot files
+    so you know what to query next.
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+    """
+    return get_minimal_context_impl(repo_path=repo_path)
+
+
+@mcp.tool
+def get_review_context(repo_path: str, depth: int = 2) -> dict:
+    """
+    Token-optimised context for code review. One call returns changed files,
+    their symbols, blast radius, and a graph summary — saving 3-4 round trips.
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+        depth:     CALLS traversal depth for blast radius (default 2).
+    """
+    return get_review_context_impl(repo_path=repo_path, depth=depth)
 
 
 # ---------------------------------------------------------------------------

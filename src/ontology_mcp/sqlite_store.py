@@ -1,3 +1,43 @@
+"""
+SQLite persistence layer for the ontology graph.
+
+Each repository gets its own database file at:
+    {repo_path}/.ontology-mcp/graph.db
+
+Schema
+------
+nodes   (id TEXT PRIMARY KEY, type TEXT, props TEXT)
+edges   (rowid INTEGER PK, source_id, rel_type, target_id, props TEXT)
+
+Both ``props`` columns store JSON.  Properties are restricted to scalar
+types (str, int, float, bool, None) so SQLite can store them as JSON
+without lossy conversion.
+
+Key design decisions
+--------------------
+- **Deduplication on write**: ``write_graph`` deduplicates edges with a
+  Python set before inserting.  The parser can emit the same structural
+  edge multiple times (e.g. ``repo→folder CONTAINS`` for every file in
+  that folder); deduplicating here keeps queries clean.
+- **Recursive CTEs**: folder and file traversal uses ``WITH RECURSIVE``
+  so depth-unlimited CONTAINS walks are expressed in a single SQL query.
+- **No ORM**: direct ``sqlite3`` calls keep the dependency footprint
+  minimal and make the SQL explicit and auditable.
+- **WAL mode**: enabled on every connection for concurrent read safety.
+
+Public API (used by tool layer)
+--------------------------------
+write_graph           — persist an OntologyGraph
+graph_exists          — check whether a graph DB exists
+read_overview         — high-level counts + top-level structure
+read_minimal_context  — ultra-compact agent-orientation summary
+read_folder           — subgraph rooted at a folder
+read_file             — subgraph for one file + cross-file edges
+read_symbol           — symbol + 1-hop neighbourhood
+read_call_chain       — BFS CALLS traversal (callers/callees)
+read_blast_radius     — reverse CALLS traversal from changed files
+"""
+
 from __future__ import annotations
 
 import json
@@ -77,8 +117,15 @@ def write_graph(graph: OntologyGraph, repo_path: str, reset: bool = True) -> dic
         )
         node_count += 1
 
+    # Deduplicate edges — the parser may emit the same structural edge
+    # (e.g. repo→folder CONTAINS) once per file in the same folder.
+    seen_edges: set[tuple[str, str, str]] = set()
     edge_count = 0
     for edge in graph.edges:
+        key = (edge.source_id, edge.rel_type, edge.target_id)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
         props = {k: v for k, v in edge.properties.items()
                  if v is None or isinstance(v, (str, int, float, bool))}
         conn.execute(
@@ -527,3 +574,73 @@ def _blast_empty(repo_path: str, changed_files: list[str], warning: str) -> dict
         "total_affected_files": 0,
         "warnings": [warning] if warning else [],
     }
+
+# ---------------------------------------------------------------------------
+# Read: minimal context (~100 tokens)
+# ---------------------------------------------------------------------------
+
+def read_minimal_context(repo_path: str) -> dict:
+    """
+    Ultra-compact graph summary for agent orientation.
+    Returns enough signal to decide what to query next — in ~100 tokens.
+    """
+    conn = _connect(repo_path)
+    try:
+        # Node counts
+        node_counts: dict[str, int] = {}
+        for row in conn.execute("SELECT type, COUNT(*) AS cnt FROM nodes GROUP BY type"):
+            node_counts[row["type"]] = row["cnt"]
+
+        # Edge counts
+        edge_counts: dict[str, int] = {}
+        for row in conn.execute("SELECT rel_type, COUNT(*) AS cnt FROM edges GROUP BY rel_type"):
+            edge_counts[row["rel_type"]] = row["cnt"]
+
+        # Repo info
+        repo_row = conn.execute(
+            "SELECT props FROM nodes WHERE type='Repository' LIMIT 1"
+        ).fetchone()
+        repo_props = json.loads(repo_row["props"]) if repo_row else {}
+
+        # Top-level folders (direct children of Repository only)
+        repo_id_row = conn.execute(
+            "SELECT id FROM nodes WHERE type='Repository' LIMIT 1"
+        ).fetchone()
+        folders = []
+        if repo_id_row:
+            folders = [
+                json.loads(r["props"]).get("path")
+                for r in conn.execute(
+                    """
+                    SELECT n.props FROM edges e
+                    JOIN nodes n ON n.id = e.target_id AND n.type = 'Folder'
+                    WHERE e.rel_type = 'CONTAINS' AND e.source_id = ?
+                    """,
+                    (repo_id_row["id"],),
+                ).fetchall()
+            ]
+
+        # Most connected files (by edge count — hotspots)
+        hotspots = [
+            json.loads(r["props"]).get("path")
+            for r in conn.execute(
+                """
+                SELECT n.props, COUNT(*) AS degree
+                FROM edges e JOIN nodes n ON n.id = e.source_id OR n.id = e.target_id
+                WHERE n.type = 'File'
+                GROUP BY n.id ORDER BY degree DESC LIMIT 5
+                """
+            ).fetchall()
+        ]
+
+        return {
+            "repo": repo_props.get("name"),
+            "path": repo_props.get("path"),
+            "nodes": node_counts,
+            "edges": edge_counts,
+            "folders": folders,
+            "hotspot_files": hotspots,
+            "db": str(db_path(repo_path)),
+        }
+    finally:
+        conn.close()

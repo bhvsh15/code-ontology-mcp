@@ -1,3 +1,12 @@
+"""
+Git utilities for detecting changed files in a local repository.
+
+Used by blast-radius analysis and the ``get_changed_files`` MCP tool to
+determine which files have been touched since the last commit, so the
+graph can answer "what is affected by my current changes?" without a
+full rebuild.
+"""
+
 from __future__ import annotations
 
 import subprocess
@@ -6,18 +15,23 @@ from pathlib import Path
 
 def get_git_modified_files(repo_path: str) -> list[str]:
     """
-    Return a deduplicated list of repo-relative paths for files that have
-    uncommitted changes, are staged, or are untracked (excluding .gitignore'd
-    files).
+    Return a sorted, deduplicated list of repo-relative file paths that are
+    currently modified, staged, or untracked (honouring ``.gitignore``).
 
-    Returns an empty list if *repo_path* is not inside a git repository.
+    Combines three git queries:
+    - ``git diff --name-only HEAD``      — unstaged + staged tracked changes
+    - ``git diff --name-only --cached``  — staged-only (handles fresh repos
+                                           with no commits yet)
+    - ``git ls-files --others --exclude-standard`` — untracked files
+
+    Returns an empty list — without raising — when ``repo_path`` is not
+    inside a git repository or git is not installed.
     """
     root = Path(repo_path).resolve()
     if not root.is_dir():
         return []
 
     try:
-        # Verify this is a git repo
         subprocess.run(
             ["git", "rev-parse", "--git-dir"],
             cwd=root,
@@ -29,34 +43,13 @@ def get_git_modified_files(repo_path: str) -> list[str]:
 
     files: set[str] = set()
 
-    # Staged + unstaged tracked changes (modified, deleted, added)
-    result = subprocess.run(
+    for cmd in (
         ["git", "diff", "--name-only", "HEAD"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        files.update(line for line in result.stdout.splitlines() if line)
-
-    # Also catch staged-only changes (e.g. in a fresh repo with no commits)
-    result = subprocess.run(
         ["git", "diff", "--name-only", "--cached"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        files.update(line for line in result.stdout.splitlines() if line)
-
-    # Untracked files (respects .gitignore)
-    result = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        files.update(line for line in result.stdout.splitlines() if line)
+    ):
+        result = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+        if result.returncode == 0:
+            files.update(line for line in result.stdout.splitlines() if line)
 
     return sorted(files)

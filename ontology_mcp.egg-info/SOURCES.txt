@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+ontology_mcp.egg-info/PKG-INFO
+ontology_mcp.egg-info/SOURCES.txt
+ontology_mcp.egg-info/dependency_links.txt
+ontology_mcp.egg-info/entry_points.txt
+ontology_mcp.egg-info/requires.txt
+ontology_mcp.egg-info/top_level.txt
+tests/test_dry_run.py
+tests/test_smoke.py

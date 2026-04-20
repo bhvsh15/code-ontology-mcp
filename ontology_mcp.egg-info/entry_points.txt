@@ -1,0 +1,2 @@
+[console_scripts]
+ontology-mcp-server = ontology_mcp.server:main

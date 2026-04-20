@@ -172,21 +172,40 @@ def _build_import_map(
 
 #Function to convert a dotted module name to candidate repo-relative file paths, checking for .py files and __init__.py in the repo
 def _module_to_rel_paths(module: str, file_dir: Path, repo_root: Path) -> list[str]:
-    """Convert a dotted module name to candidate repo-relative file paths."""
+    """Convert a dotted module name to candidate repo-relative file paths.
+
+    Walks up from file_dir toward repo_root so that `from auth.utils import foo`
+    resolves correctly whether `auth/` sits at the repo root or inside a
+    subdirectory like `backend/auth/`.
+    """
     if not module:
         return []
     rel_module = module.replace(".", "/")
-    candidates = [
-        rel_module,
-        str(file_dir / rel_module).replace("\\", "/"),
-    ]
-    results = []
-    for c in candidates:
-        if (repo_root / (c + ".py")).exists():
-            results.append(c)
-        elif (repo_root / c / "__init__.py").exists():
-            results.append(c + "/__init__")
-    return results
+
+    # file_dir may be relative; resolve candidates as repo-relative strings.
+    cur = file_dir  # relative path, e.g. "backend/auth"
+    seen: set[str] = set()
+    while True:
+        rel_str = (cur / rel_module).as_posix()
+        if rel_str not in seen:
+            seen.add(rel_str)
+            if (repo_root / (rel_str + ".py")).exists():
+                return [rel_str]
+            if (repo_root / rel_str / "__init__.py").exists():
+                return [rel_str + "/__init__"]
+        parent = cur.parent
+        if parent == cur or str(cur) in (".", ""):
+            break
+        cur = parent
+
+    # Final try: directly from repo root
+    if rel_module not in seen:
+        if (repo_root / (rel_module + ".py")).exists():
+            return [rel_module]
+        if (repo_root / rel_module / "__init__.py").exists():
+            return [rel_module + "/__init__"]
+
+    return []
 
 
 # ---------------------------------------------------------------------------

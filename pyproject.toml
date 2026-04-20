@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ontology-mcp"
 version = "0.1.0"
-description = "FastMCP server for Python code ontology generation in Neo4j"
+description = "FastMCP server for multi-language code ontology generation"
 requires-python = ">=3.9"
 dependencies = [
   "fastmcp>=2.0.0",
-  "neo4j>=5.20.0",
+  "tree-sitter-language-pack>=0.3.0",
 ]
 
 [tool.setuptools]
@@ -20,3 +20,6 @@ where = ["src"]
 
 [project.scripts]
 ontology-mcp-server = "ontology_mcp.server:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
