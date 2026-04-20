@@ -20,16 +20,29 @@ class Neo4jConfig:
     database: str
 
 
-#Load Neo4j configuration from environment variables, with defaults
+class Neo4jConfigError(RuntimeError):
+    """Raised when required Neo4j env vars are missing or empty."""
+
+
 def load_neo4j_config() -> Neo4jConfig:
-    uri = os.environ.get("NEO4J_URI", "")
-    username = os.environ.get("NEO4J_USERNAME", "neo4j")
+    uri = os.environ.get("NEO4J_URI", "").strip()
+    username = os.environ.get("NEO4J_USERNAME", "neo4j").strip()
     password = os.environ.get("NEO4J_PASSWORD", "")
-    database = os.environ.get("NEO4J_DATABASE", "neo4j")
-    #For Neo4j aura
+    database = os.environ.get("NEO4J_DATABASE", "neo4j").strip() or "neo4j"
+
+    missing = [
+        name for name, value in (("NEO4J_URI", uri), ("NEO4J_PASSWORD", password))
+        if not value
+    ]
+    if missing:
+        raise Neo4jConfigError(
+            "Missing required Neo4j environment variable(s): "
+            + ", ".join(missing)
+            + ". Set them in your shell or a .env file before connecting."
+        )
+
     if uri.startswith("neo4j+s://"):
         uri = uri.replace("neo4j+s://", "neo4j+ssc://", 1)
-    #For Neo4j local with bolt protocol
     elif uri.startswith("bolt+s://"):
         uri = uri.replace("bolt+s://", "bolt+ssc://", 1)
     return Neo4jConfig(uri=uri, username=username, password=password, database=database)
@@ -69,7 +82,6 @@ def write_graph_to_neo4j(
             for node in graph.nodes.values():
                 if node.type not in ALLOWED_NODE_LABELS:
                     continue
-                # FIX: was node.props — correct field name is node.properties
                 props = _sanitize_props(node.properties)
                 session.run(
                     f"MERGE (n:{node.type} {{id: $id}}) SET n += $props",
@@ -81,7 +93,6 @@ def write_graph_to_neo4j(
             for edge in graph.edges:
                 if edge.rel_type not in ALLOWED_REL_TYPES:
                     continue
-                # FIX: was edge.props — correct field name is edge.properties
                 props = _sanitize_props(edge.properties)
                 session.run(
                     f"""

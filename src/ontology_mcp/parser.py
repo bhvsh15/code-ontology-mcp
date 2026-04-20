@@ -536,7 +536,6 @@ def _process_class(
             import_map=import_map,
             node_type="Method",
             outer_qualname=qualname,
-            use_has_method=True,
         )
 
     # Nested classes (recursive)

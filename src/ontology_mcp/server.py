@@ -5,8 +5,9 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
-#Git modification tool
+from ontology_mcp.setup_env import ensure_env
 from ontology_mcp.git_utils import get_git_modified_files
+from ontology_mcp.tools.blast_radius import get_blast_radius as get_blast_radius_impl
 #Build and query tool implementations 
 from ontology_mcp.tools.build_python_code_ontology import (build_python_code_ontology as build_python_code_ontology_impl,)
 #Query tool implementations
@@ -18,6 +19,8 @@ from ontology_mcp.tools.query_graph import (
     query_call_chain as query_call_chain_impl,
 )
 
+ensure_env()
+
 mcp = FastMCP(name="ontology-mcp")
 
 
@@ -28,6 +31,37 @@ mcp = FastMCP(name="ontology-mcp")
 @mcp.tool
 def healthcheck() -> dict[str, str]:
     return {"status": "ok", "service": "ontology-mcp"}
+
+
+@mcp.tool
+def get_connection_info() -> dict:
+    """
+    Return everything an external agent needs to launch and connect to this
+    MCP server — the uv command, absolute paths, and current Neo4j env status.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    server_file = Path(__file__).resolve()
+
+    uv_command = (
+        f"uv run --project {project_root} ontology-mcp-server"
+    )
+
+    import os
+    from ontology_mcp.setup_env import _REQUIRED
+    tracked = list(_REQUIRED) + ["NEO4J_USERNAME", "NEO4J_DATABASE"]
+    env_status = {
+        var: "set" if os.environ.get(var, "").strip() else "MISSING"
+        for var in tracked
+    }
+
+    return {
+        "server_file": str(server_file),
+        "project_root": str(project_root),
+        "uv_command": uv_command,
+        "mcp_config_file": str(project_root / "mcp-config.json"),
+        "neo4j_env": env_status,
+        "ready": all(v == "set" for v in [env_status[r] for r in _REQUIRED]),
+    }
 
 
 @mcp.tool
@@ -77,6 +111,38 @@ def get_changed_files(repo_path: str) -> dict:
         "files": files,
         "count": len(files),
     }
+
+
+# ---------------------------------------------------------------------------
+# Blast radius
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_blast_radius(
+    repo_name: str,
+    repo_path: str,
+    depth: int = 3,
+    file_paths: list[str] | None = None,
+) -> dict:
+    """
+    Show what is affected by the current uncommitted changes in a repo.
+
+    Traverses CALLS edges backwards from changed symbols to find every
+    function, method, and class that depends on them — and which files
+    those live in.
+
+    Args:
+        repo_name:  Repository directory name (must already be built in Neo4j).
+        repo_path:  Absolute path to the repo on disk (used for git detection).
+        depth:      Max CALLS hops to traverse, 1–10 (default 3).
+        file_paths: Override git detection — pass explicit repo-relative paths.
+    """
+    return get_blast_radius_impl(
+        repo_name=repo_name,
+        repo_path=repo_path,
+        depth=depth,
+        file_paths=file_paths,
+    )
 
 
 # ---------------------------------------------------------------------------

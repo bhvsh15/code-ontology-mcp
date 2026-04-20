@@ -496,6 +496,7 @@ def read_symbol(
 
 # ---------------------------------------------------------------------------
 # Query: call chain (callers + callees, configurable depth)
+
 # ---------------------------------------------------------------------------
 def read_call_chain(
     repo_name: str,
@@ -619,3 +620,132 @@ def read_call_chain(
     finally:
         session.close()
         driver.close()
+
+# ---------------------------------------------------------------------------
+# Query: blast radius — what is affected by a set of changed files?
+# ---------------------------------------------------------------------------
+def read_blast_radius(
+    repo_name: str,
+    changed_file_paths: list[str],
+    depth: int = 3,
+    config: Neo4jConfig | None = None,
+) -> dict:
+    """
+    Given repo-relative file paths that changed, return every symbol and file
+    transitively affected via CALLS edges (up to `depth` hops).
+    """
+    cfg = config or load_neo4j_config()
+    depth = min(max(depth, 1), 10)
+    driver, session = _open_session(cfg)
+
+    try:
+        if not changed_file_paths:
+            return _blast_empty(repo_name, changed_file_paths, "No changed files provided.")
+
+        # Step 1: resolve file nodes that exist in the graph
+        file_rows = list(session.run(
+            """
+            MATCH (r:Repository {name: $repo_name})-[:CONTAINS*1..]->(f:File)
+            WHERE f.path IN $paths
+            RETURN f.id AS file_id, f.path AS file_path
+            """,
+            repo_name=repo_name,
+            paths=changed_file_paths,
+        ))
+        found_paths = {r["file_path"] for r in file_rows}
+        missing_paths = [p for p in changed_file_paths if p not in found_paths]
+        file_ids = [r["file_id"] for r in file_rows]
+
+        warnings: list[str] = []
+        if missing_paths:
+            warnings.append(f"Files not in graph (run build first?): {missing_paths}")
+
+        if not file_ids:
+            return _blast_empty(repo_name, changed_file_paths, warnings[0] if warnings else "")
+
+        # Step 2: symbols defined in the changed files
+        changed_syms = [
+            _sym_row(r) for r in session.run(
+                """
+                MATCH (f)-[:DEFINES|CONTAINS*0..]->(sym)
+                WHERE f.id IN $file_ids
+                  AND (sym:Function OR sym:Method OR sym:Class)
+                RETURN sym.id AS id, sym.name AS name, sym.qualname AS qualname,
+                       sym.file_path AS file_path, labels(sym)[0] AS type
+                """,
+                file_ids=file_ids,
+            )
+        ]
+        changed_sym_ids = [s["id"] for s in changed_syms]
+
+        if not changed_sym_ids:
+            warnings.append("Changed files contain no tracked symbols.")
+            return {
+                "repo_name": repo_name,
+                "changed_files": sorted(found_paths),
+                "changed_symbols": [],
+                "affected_symbols": [],
+                "affected_files": [],
+                "total_changed_symbols": 0,
+                "total_affected_symbols": 0,
+                "total_affected_files": 0,
+                "warnings": warnings,
+            }
+
+        # Step 3: callers of changed symbols (transitive, up to depth hops)
+        affected_syms = [
+            _sym_row(r) for r in session.run(
+                f"""
+                MATCH (caller)-[:CALLS*1..{depth}]->(target)
+                WHERE target.id IN $changed_sym_ids
+                  AND NOT caller.id IN $changed_sym_ids
+                WITH DISTINCT caller
+                RETURN caller.id AS id, caller.name AS name,
+                       caller.qualname AS qualname, caller.file_path AS file_path,
+                       labels(caller)[0] AS type
+                """,
+                changed_sym_ids=changed_sym_ids,
+            )
+        ]
+
+        affected_files = sorted({s["file_path"] for s in affected_syms if s["file_path"]})
+
+        return {
+            "repo_name": repo_name,
+            "changed_files": sorted(found_paths),
+            "changed_symbols": changed_syms,
+            "affected_symbols": affected_syms,
+            "affected_files": affected_files,
+            "total_changed_symbols": len(changed_syms),
+            "total_affected_symbols": len(affected_syms),
+            "total_affected_files": len(affected_files),
+            "warnings": warnings,
+        }
+
+    finally:
+        session.close()
+        driver.close()
+
+
+def _sym_row(r: Any) -> dict:
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "qualname": r["qualname"],
+        "file_path": r["file_path"],
+        "type": r["type"],
+    }
+
+
+def _blast_empty(repo_name: str, changed_files: list[str], warning: str) -> dict:
+    return {
+        "repo_name": repo_name,
+        "changed_files": changed_files,
+        "changed_symbols": [],
+        "affected_symbols": [],
+        "affected_files": [],
+        "total_changed_symbols": 0,
+        "total_affected_symbols": 0,
+        "total_affected_files": 0,
+        "warnings": [warning] if warning else [],
+    }

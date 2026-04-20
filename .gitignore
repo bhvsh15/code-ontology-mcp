@@ -1,2 +1,4 @@
 sh
 sh.pub
+.env
+mcp-config.json
