@@ -55,10 +55,14 @@ DB_FILE = "graph.db"
 # Connection
 # ---------------------------------------------------------------------------
 
+#Function to get the path to the database file for a given repository path
+# What it does: Returns the full file path to the SQLite database for a repo.
+# Input: path to the repo folder.
+# Output: a Path object pointing to {repo}/.ontology-mcp/graph.db
 def db_path(repo_path: str) -> Path:
     return Path(repo_path).resolve() / DB_DIR / DB_FILE
 
-
+# Internal helper to connect to the SQLite database, creating it if necessary
 def _connect(repo_path: str, create: bool = False) -> sqlite3.Connection:
     path = db_path(repo_path)
     if not create and not path.exists():
@@ -73,7 +77,7 @@ def _connect(repo_path: str, create: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
-
+# Internal helper to initialize the database schema if it doesn't exist
 def _bootstrap(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS nodes (
@@ -99,6 +103,11 @@ def _bootstrap(conn: sqlite3.Connection) -> None:
 # Write
 # ---------------------------------------------------------------------------
 
+
+# Public API: write an OntologyGraph to the SQLite database for a repo
+# What it does: Takes the full in-memory graph and saves it to SQLite.
+# Input: the OntologyGraph object, the repo path, and whether to wipe existing data first.
+# Output: a summary dict showing how many nodes and edges were written.
 def write_graph(graph: OntologyGraph, repo_path: str, reset: bool = True) -> dict:
     conn = _connect(repo_path, create=True)
     _bootstrap(conn)
@@ -143,15 +152,17 @@ def write_graph(graph: OntologyGraph, repo_path: str, reset: bool = True) -> dic
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Internal helper to convert a SQLite row to a node dict with properties
 def _row_to_node(row: sqlite3.Row) -> dict:
     props = json.loads(row["props"])
     return {"id": row["id"], "type": row["type"], **props}
 
-
+# Internal helper to extract a list of IDs from a list of SQLite rows
 def _ids_from(rows: list[sqlite3.Row]) -> list[str]:
     return [r["id"] for r in rows]
 
 
+# Internal helper to create a string of SQL placeholders for a list of IDs
 def _placeholders(ids: list[str]) -> str:
     return ",".join("?" * len(ids))
 
@@ -160,6 +171,9 @@ def _placeholders(ids: list[str]) -> str:
 # Read: existence check
 # ---------------------------------------------------------------------------
 
+# What it does: Checks whether a graph has been built for this repo.
+# Input: repo path.
+# Output: True if the database file exists, False if not.
 def graph_exists(repo_path: str) -> bool:
     return db_path(repo_path).exists()
 
@@ -168,6 +182,9 @@ def graph_exists(repo_path: str) -> bool:
 # Read: overview
 # ---------------------------------------------------------------------------
 
+# What it does: Returns a high-level summary of everything in the graph.
+# Input: repo path.
+# Output: node counts by type, edge counts by type, and the top-level folder/file list.
 def read_overview(repo_path: str) -> dict:
     conn = _connect(repo_path)
     try:
@@ -213,6 +230,9 @@ def read_overview(repo_path: str) -> dict:
 # Read: folder subgraph
 # ---------------------------------------------------------------------------
 
+# What it does: Returns everything inside a specific folder — all files, classes, functions, and connections.
+# Input: repo path, and the folder path relative to the repo root (e.g. "backend/routes").
+# Output: all nodes and edges inside that folder.
 def read_folder(repo_path: str, folder_path: str) -> dict:
     conn = _connect(repo_path)
     try:
@@ -260,6 +280,9 @@ def read_folder(repo_path: str, folder_path: str) -> dict:
 # Read: file subgraph
 # ---------------------------------------------------------------------------
 
+# What it does: Returns everything a single file contains plus its cross-file connections.
+# Input: repo path, and the file path relative to the repo root.
+# Output: all symbols in the file plus cross-file CALLS and EXTENDS edges.
 def read_file(repo_path: str, file_path: str) -> dict:
     conn = _connect(repo_path)
     try:
@@ -335,6 +358,9 @@ def read_file(repo_path: str, file_path: str) -> dict:
 # Read: symbol lookup
 # ---------------------------------------------------------------------------
 
+# What it does: Finds a class, function, or method by name and returns it with everything directly connected to it.
+# Input: repo path, exact symbol name, and optionally the type (Class/Function/Method).
+# Output: the matching node(s) and all their immediate neighbours and edges.
 def read_symbol(repo_path: str, symbol_name: str, symbol_type: str | None = None) -> dict:
     conn = _connect(repo_path)
     try:
@@ -383,6 +409,9 @@ def read_symbol(repo_path: str, symbol_name: str, symbol_type: str | None = None
 # Read: call chain
 # ---------------------------------------------------------------------------
 
+# What it does: Traces who calls a function or what it calls, up to N hops.
+# Input: repo path, function name, direction (callers/callees/both), and max depth.
+# Output: all functions in the call chain with the edges connecting them.
 def read_call_chain(
     repo_path: str,
     symbol_name: str,
@@ -446,6 +475,9 @@ def read_call_chain(
 # Read: blast radius
 # ---------------------------------------------------------------------------
 
+# What it does: Given changed files, finds every function and file that could break because it calls into the changed code.
+# Input: repo path, list of changed file paths, and how many hops to follow.
+# Output: changed symbols, affected symbols, affected files, and counts of each.
 def read_blast_radius(
     repo_path: str,
     changed_file_paths: list[str],
@@ -579,6 +611,9 @@ def _blast_empty(repo_path: str, changed_files: list[str], warning: str) -> dict
 # Read: minimal context (~100 tokens)
 # ---------------------------------------------------------------------------
 
+# What it does: Returns the smallest useful summary of the graph — just enough for an agent to orient itself.
+# Input: repo path.
+# Output: node/edge counts, top-level folders, and the 5 most-connected files.
 def read_minimal_context(repo_path: str) -> dict:
     """
     Ultra-compact graph summary for agent orientation.
@@ -642,5 +677,63 @@ def read_minimal_context(repo_path: str) -> dict:
             "hotspot_files": hotspots,
             "db": str(db_path(repo_path)),
         }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Read: hub nodes — most connected symbols
+# ---------------------------------------------------------------------------
+
+# What it does: Finds the most connected symbols in the codebase ranked by total connections.
+# Input: repo path, how many results you want, and which node types to include.
+# Output: ranked list of symbols with inbound, outbound, and total connection counts.
+# Why it matters: high connection count = high risk if that symbol changes.
+def read_hub_nodes(repo_path: str, top_n: int = 10, node_types: list[str] | None = None) -> list[dict]:
+    """
+    Return the top N most-connected nodes (classes, functions, methods).
+
+    A node's connection count is the total of:
+    - outbound edges (things it calls / defines / imports)
+    - inbound edges  (things that call / use it)
+
+    High connection count = high blast radius if changed.
+    """
+    types = node_types or ["Function", "Method", "Class"]
+    placeholders = ",".join(f"'{t}'" for t in types)
+
+    conn = _connect(repo_path)
+    try:
+        rows = conn.execute(f"""
+            SELECT
+                n.id,
+                json_extract(n.props, '$.name')      AS name,
+                json_extract(n.props, '$.qualname')  AS qualname,
+                json_extract(n.props, '$.file_path') AS file_path,
+                n.type,
+                COUNT(DISTINCT e1.rowid) AS outbound,
+                COUNT(DISTINCT e2.rowid) AS inbound,
+                COUNT(DISTINCT e1.rowid) + COUNT(DISTINCT e2.rowid) AS total
+            FROM nodes n
+            LEFT JOIN edges e1 ON e1.source_id = n.id
+            LEFT JOIN edges e2 ON e2.target_id = n.id
+            WHERE n.type IN ({placeholders})
+            GROUP BY n.id
+            ORDER BY total DESC
+            LIMIT ?
+        """, (top_n,)).fetchall()
+
+        return [
+            {
+                "name":      row["name"],
+                "qualname":  row["qualname"],
+                "type":      row["type"],
+                "file_path": row["file_path"],
+                "inbound":   row["inbound"],
+                "outbound":  row["outbound"],
+                "total":     row["total"],
+            }
+            for row in rows
+        ]
     finally:
         conn.close()

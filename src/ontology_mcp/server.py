@@ -19,6 +19,7 @@ query_folder             — subgraph for a folder
 query_file               — subgraph for a single file
 query_symbol             — symbol lookup with 1-hop neighbours
 query_call_chain         — callers / callees traversal
+get_hub_nodes            — most connected symbols, filterable by type (Class/Function/Method)
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from ontology_mcp.tools.context_tools import (
     get_review_context as get_review_context_impl,
 )
 from ontology_mcp.tools.blast_radius import get_blast_radius as get_blast_radius_impl
+from ontology_mcp.tools.hub_nodes import get_hub_nodes as get_hub_nodes_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -106,6 +108,35 @@ def get_changed_files(repo_path: str) -> dict:
             }
 
     return {"repo_path": str(root), "files": files, "count": len(files)}
+
+
+# ---------------------------------------------------------------------------
+# Hub nodes
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_hub_nodes(
+    repo_path: str,
+    top_n: int = 10,
+    node_types: list[str] | None = None,
+) -> dict:
+    """
+    Find the most connected symbols in the codebase.
+
+    Returns symbols ranked by total connections (inbound + outbound).
+    The more connections a symbol has, the higher the risk if it changes.
+
+    Args:
+        repo_path:   Absolute path to the repo on disk.
+        top_n:       How many results to return (default 10).
+        node_types:  Filter by type. Options: "Class", "Function", "Method".
+                     Pass one, two, or all three. Defaults to all three.
+
+    Examples:
+        get_hub_nodes(repo_path="...", node_types=["Function"])
+        get_hub_nodes(repo_path="...", node_types=["Class"], top_n=5)
+    """
+    return get_hub_nodes_impl(repo_path=repo_path, top_n=top_n, node_types=node_types)
 
 
 # ---------------------------------------------------------------------------
