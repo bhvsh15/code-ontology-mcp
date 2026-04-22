@@ -42,6 +42,8 @@ from ontology_mcp.tools.detect_changes import get_detect_changes as get_detect_c
 from ontology_mcp.tools.communities import get_list_communities as get_list_communities_impl
 from ontology_mcp.tools.bridge_nodes import get_bridge_nodes as get_bridge_nodes_impl
 from ontology_mcp.tools.knowledge_gaps import get_knowledge_gaps as get_knowledge_gaps_impl
+from ontology_mcp.tools.architecture_overview import get_architecture_overview as get_architecture_overview_impl
+from ontology_mcp.tools.flows import get_list_flows as get_list_flows_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -203,6 +205,75 @@ def get_knowledge_gaps(repo_path: str, hotspot_degree: int = 5) -> dict:
         hotspot_degree:  Minimum degree to qualify as a hotspot (default 5).
     """
     return get_knowledge_gaps_impl(repo_path=repo_path, hotspot_degree=hotspot_degree)
+
+
+# ---------------------------------------------------------------------------
+# Architecture overview
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_architecture_overview(
+    repo_path: str,
+    top_communities: int = 10,
+    top_bridge: int = 10,
+    top_hubs: int = 10,
+) -> dict:
+    """
+    Return a high-level architectural map of the codebase in one call.
+
+    Combines three analyses:
+      - communities:   natural clusters of tightly coupled files/symbols
+      - bridge_nodes:  chokepoints that connect different communities
+      - hub_nodes:     most connected symbols by degree
+
+    Use this as the first call when exploring an unfamiliar codebase.
+
+    Args:
+        repo_path:       Absolute path to the repo on disk.
+        top_communities: How many communities to include (default 10).
+        top_bridge:      How many bridge nodes to include (default 10).
+        top_hubs:        How many hub nodes to include (default 10).
+    """
+    return get_architecture_overview_impl(
+        repo_path=repo_path,
+        top_communities=top_communities,
+        top_bridge=top_bridge,
+        top_hubs=top_hubs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Flows
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def list_flows(
+    repo_path: str,
+    max_depth: int = 5,
+    max_entries: int = 20,
+    top_n: int = 20,
+) -> dict:
+    """
+    Detect entry points and trace their full execution paths via BFS.
+
+    Entry points are functions with no inbound CALLS edges — route handlers,
+    main functions, CLI commands, scheduled tasks, etc.
+    Each flow is traced outward through CALLS edges up to max_depth hops.
+
+    Use this to understand what each entry point triggers downstream.
+
+    Args:
+        repo_path:    Absolute path to the repo on disk.
+        max_depth:    BFS depth limit per entry point (default 5).
+        max_entries:  Max entry points to trace (default 20).
+        top_n:        How many flows to return, longest first (default 20).
+    """
+    return get_list_flows_impl(
+        repo_path=repo_path,
+        max_depth=max_depth,
+        max_entries=max_entries,
+        top_n=top_n,
+    )
 
 
 # ---------------------------------------------------------------------------

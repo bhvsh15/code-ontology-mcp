@@ -109,6 +109,10 @@ def _bootstrap(conn: sqlite3.Connection) -> None:
             gap_type     TEXT NOT NULL,
             detail       TEXT NOT NULL DEFAULT '{}'
         );
+        CREATE TABLE IF NOT EXISTS flows (
+            entry_id     TEXT PRIMARY KEY,
+            path         TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_edges_source  ON edges(source_id);
         CREATE INDEX IF NOT EXISTS idx_edges_target  ON edges(target_id);
         CREATE INDEX IF NOT EXISTS idx_edges_rel     ON edges(rel_type);
@@ -1280,6 +1284,129 @@ def read_knowledge_gaps(repo_path: str) -> dict:
                 "count": len(untested_hotspots),
                 "nodes": untested_hotspots,
             },
+        }
+    finally:
+        conn.close()
+
+
+# What it does: Detects entry points (0 inbound CALLS) and BFS-traces each call path.
+# Input: repo path, max BFS depth (default 5), max entry points to trace (default 20).
+# Output: summary dict with counts of entry points and flows stored.
+def build_flows(repo_path: str, max_depth: int = 5, max_entries: int = 20) -> dict:
+    conn = _connect(repo_path)
+    _bootstrap(conn)
+    try:
+        # Only trace Function and Method nodes
+        node_rows = conn.execute(
+            "SELECT id, props FROM nodes WHERE type IN ('Function', 'Method')"
+        ).fetchall()
+
+        if not node_rows:
+            return {"error": "No nodes found. Run build_python_code_ontology first."}
+
+        all_fn_ids = {r["id"] for r in node_rows}
+        props_map = {r["id"]: json.loads(r["props"]) for r in node_rows}
+
+        # Build adjacency: caller → [callees]
+        call_rows = conn.execute(
+            "SELECT source_id, target_id FROM edges WHERE rel_type = 'CALLS'"
+        ).fetchall()
+
+        callees: dict[str, list[str]] = {nid: [] for nid in all_fn_ids}
+        inbound: dict[str, int] = {nid: 0 for nid in all_fn_ids}
+
+        for r in call_rows:
+            src, dst = r["source_id"], r["target_id"]
+            if src in all_fn_ids and dst in all_fn_ids:
+                callees[src].append(dst)
+                inbound[dst] = inbound.get(dst, 0) + 1
+
+        # Entry points: functions with 0 inbound CALLS edges
+        # Sort by outbound call count descending so interesting flows come first
+        entries = sorted(
+            [nid for nid in all_fn_ids if inbound.get(nid, 0) == 0],
+            key=lambda nid: len(callees.get(nid, [])),
+            reverse=True,
+        )[:max_entries]
+
+        conn.execute("DELETE FROM flows")
+        stored = 0
+
+        for entry_id in entries:
+            # BFS
+            path_nodes = []
+            visited = set()
+            queue = [(entry_id, 0)]
+
+            while queue:
+                cur_id, depth = queue.pop(0)
+                if cur_id in visited or depth > max_depth:
+                    continue
+                visited.add(cur_id)
+                p = props_map.get(cur_id, {})
+                path_nodes.append({
+                    "id": cur_id,
+                    "name": p.get("name", cur_id),
+                    "file_path": p.get("file_path"),
+                    "depth": depth,
+                })
+                for callee_id in callees.get(cur_id, []):
+                    if callee_id not in visited:
+                        queue.append((callee_id, depth + 1))
+
+            conn.execute(
+                "INSERT OR REPLACE INTO flows(entry_id, path) VALUES (?, ?)",
+                (entry_id, json.dumps(path_nodes)),
+            )
+            stored += 1
+
+        conn.commit()
+
+        return {
+            "status": "built",
+            "total_functions": len(all_fn_ids),
+            "entry_points_found": len(entries),
+            "flows_stored": stored,
+        }
+    finally:
+        conn.close()
+
+
+# What it does: Reads stored flows from SQLite and returns them as a list.
+# Input: repo path, max flows to return (default 20).
+# Output: list of flows, each with an entry point and its BFS call path.
+def read_flows(repo_path: str, top_n: int = 20) -> dict:
+    conn = _connect(repo_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) AS cnt FROM flows").fetchone()["cnt"]
+        if count == 0:
+            return {"error": "No flows built yet. Call list_flows to compute them first."}
+
+        rows = conn.execute("""
+            SELECT f.entry_id, f.path, n.props
+            FROM flows f
+            JOIN nodes n ON n.id = f.entry_id
+            ORDER BY json_array_length(f.path) DESC
+            LIMIT ?
+        """, (top_n,)).fetchall()
+
+        flows_out = []
+        for r in rows:
+            props = json.loads(r["props"])
+            path = json.loads(r["path"])
+            flows_out.append({
+                "entry_point": {
+                    "name": props.get("name", r["entry_id"]),
+                    "file_path": props.get("file_path"),
+                },
+                "path_length": len(path),
+                "path": path,
+            })
+
+        return {
+            "total_flows": count,
+            "showing": len(flows_out),
+            "flows": flows_out,
         }
     finally:
         conn.close()
