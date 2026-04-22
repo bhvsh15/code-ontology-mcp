@@ -96,10 +96,24 @@ def _bootstrap(conn: sqlite3.Connection) -> None:
             path TEXT PRIMARY KEY,
             hash TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS communities (
+            node_id      TEXT PRIMARY KEY,
+            community_id INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS bridge_nodes (
+            node_id     TEXT PRIMARY KEY,
+            score       REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS knowledge_gaps (
+            node_id      TEXT PRIMARY KEY,
+            gap_type     TEXT NOT NULL,
+            detail       TEXT NOT NULL DEFAULT '{}'
+        );
         CREATE INDEX IF NOT EXISTS idx_edges_source  ON edges(source_id);
         CREATE INDEX IF NOT EXISTS idx_edges_target  ON edges(target_id);
         CREATE INDEX IF NOT EXISTS idx_edges_rel     ON edges(rel_type);
         CREATE INDEX IF NOT EXISTS idx_nodes_type    ON nodes(type);
+        CREATE INDEX IF NOT EXISTS idx_communities_cid ON communities(community_id);
     """)
 
 
@@ -889,6 +903,383 @@ def read_traverse(
             "total_edges": len(all_edges),
             "nodes": all_nodes,
             "edges": all_edges,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Communities — Louvain community detection
+# ---------------------------------------------------------------------------
+
+# What it does: Loads the graph into networkx, runs Louvain community detection,
+# and saves the results to the communities table in SQLite.
+# Input: repo path.
+# Output: summary dict with total nodes, edges, and number of communities found.
+# Why it matters: reveals the natural architectural layers of the codebase —
+#                 which files/functions cluster together vs. are isolated.
+def build_communities(repo_path: str) -> dict:
+    try:
+        import networkx as nx
+    except ImportError:
+        return {"error": "networkx is not installed. Run: pip install networkx"}
+
+    conn = _connect(repo_path)
+    _bootstrap(conn)
+    try:
+        # Load symbol nodes only (not structural Repository/Folder nodes)
+        node_rows = conn.execute(
+            "SELECT id FROM nodes WHERE type IN ('File','Class','Function','Method')"
+        ).fetchall()
+
+        if not node_rows:
+            return {"error": "No nodes found. Run build_python_code_ontology first."}
+
+        node_ids = {r["id"] for r in node_rows}
+
+        G = nx.Graph()
+        G.add_nodes_from(node_ids)
+
+        # Only meaningful semantic edges — skip structural CONTAINS
+        edge_rows = conn.execute(
+            "SELECT source_id, target_id FROM edges "
+            "WHERE rel_type IN ('CALLS','DEFINES','IMPORTS','EXTENDS')"
+        ).fetchall()
+        for r in edge_rows:
+            if r["source_id"] in node_ids and r["target_id"] in node_ids:
+                G.add_edge(r["source_id"], r["target_id"])
+
+        communities = nx.community.louvain_communities(G, seed=42)
+
+        conn.execute("DELETE FROM communities")
+        for comm_id, node_set in enumerate(communities):
+            conn.executemany(
+                "INSERT OR REPLACE INTO communities(node_id, community_id) VALUES (?, ?)",
+                [(nid, comm_id) for nid in node_set],
+            )
+        conn.commit()
+
+        return {
+            "status": "built",
+            "total_nodes": G.number_of_nodes(),
+            "total_edges": G.number_of_edges(),
+            "total_communities": len(communities),
+            "community_sizes": sorted([len(c) for c in communities], reverse=True),
+        }
+    finally:
+        conn.close()
+
+
+# What it does: Computes betweenness centrality for all symbol nodes and stores the top results.
+# Input: repo path, and how many top bridge nodes to keep (default 50).
+# Output: summary dict with node count and top scores.
+def build_bridge_nodes(repo_path: str, top_n: int = 50) -> dict:
+    try:
+        import networkx as nx
+    except ImportError:
+        return {"error": "networkx is not installed. Run: pip install networkx"}
+
+    conn = _connect(repo_path)
+    _bootstrap(conn)
+    try:
+        node_rows = conn.execute(
+            "SELECT id FROM nodes WHERE type IN ('File','Class','Function','Method')"
+        ).fetchall()
+
+        if not node_rows:
+            return {"error": "No nodes found. Run build_python_code_ontology first."}
+
+        node_ids = {r["id"] for r in node_rows}
+
+        G = nx.Graph()
+        G.add_nodes_from(node_ids)
+
+        edge_rows = conn.execute(
+            "SELECT source_id, target_id FROM edges "
+            "WHERE rel_type IN ('CALLS','DEFINES','IMPORTS','EXTENDS')"
+        ).fetchall()
+        for r in edge_rows:
+            if r["source_id"] in node_ids and r["target_id"] in node_ids:
+                G.add_edge(r["source_id"], r["target_id"])
+
+        centrality = nx.betweenness_centrality(G, normalized=True)
+
+        # Keep only top_n non-zero scores
+        top = sorted(
+            [(nid, score) for nid, score in centrality.items() if score > 0],
+            key=lambda x: x[1],
+            reverse=True,
+        )[:top_n]
+
+        conn.execute("DELETE FROM bridge_nodes")
+        conn.executemany(
+            "INSERT OR REPLACE INTO bridge_nodes(node_id, score) VALUES (?, ?)",
+            top,
+        )
+        conn.commit()
+
+        return {
+            "status": "built",
+            "total_nodes": G.number_of_nodes(),
+            "total_edges": G.number_of_edges(),
+            "bridge_nodes_found": len(top),
+        }
+    finally:
+        conn.close()
+
+
+# What it does: Reads community data from SQLite and returns a structured summary.
+# Input: repo path, and how many communities to return (default 20, largest first).
+# Output: list of communities, each with a label, size, top nodes, and the files they span.
+def read_communities(repo_path: str, top_n: int = 20) -> dict:
+    conn = _connect(repo_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) AS cnt FROM communities").fetchone()["cnt"]
+        if count == 0:
+            return {
+                "error": "No communities built yet. Call list_communities to detect them first."
+            }
+
+        total_communities = conn.execute(
+            "SELECT COUNT(DISTINCT community_id) AS cnt FROM communities"
+        ).fetchone()["cnt"]
+
+        size_rows = conn.execute("""
+            SELECT community_id, COUNT(*) AS size
+            FROM communities
+            GROUP BY community_id
+            ORDER BY size DESC
+            LIMIT ?
+        """, (top_n,)).fetchall()
+
+        communities_out = []
+        for row in size_rows:
+            comm_id = row["community_id"]
+            size = row["size"]
+
+            # Top 5 nodes in this community ranked by degree
+            top_node_rows = conn.execute("""
+                SELECT n.id, n.type, n.props,
+                       COUNT(DISTINCT e1.rowid) + COUNT(DISTINCT e2.rowid) AS degree
+                FROM communities c
+                JOIN nodes n ON n.id = c.node_id
+                LEFT JOIN edges e1 ON e1.source_id = n.id
+                LEFT JOIN edges e2 ON e2.target_id = n.id
+                WHERE c.community_id = ?
+                GROUP BY n.id
+                ORDER BY degree DESC
+                LIMIT 5
+            """, (comm_id,)).fetchall()
+
+            top_nodes = []
+            label = f"community_{comm_id}"
+            for i, n in enumerate(top_node_rows):
+                props = json.loads(n["props"])
+                name = props.get("name") or n["id"]
+                if i == 0:
+                    fp = props.get("file_path") or ""
+                    if fp:
+                        # Use the first path component as a short readable label
+                        label = fp.split("/")[0] if "/" in fp else fp.removesuffix(".py")
+                    else:
+                        label = name
+                top_nodes.append({
+                    "name": name,
+                    "type": n["type"],
+                    "file_path": props.get("file_path"),
+                    "degree": n["degree"],
+                })
+
+            # Distinct files that have symbols in this community
+            file_rows = conn.execute("""
+                SELECT DISTINCT json_extract(n.props, '$.file_path') AS fp
+                FROM communities c
+                JOIN nodes n ON n.id = c.node_id
+                WHERE c.community_id = ?
+                  AND json_extract(n.props, '$.file_path') IS NOT NULL
+                LIMIT 15
+            """, (comm_id,)).fetchall()
+            files = [r["fp"] for r in file_rows if r["fp"]]
+
+            communities_out.append({
+                "community_id": comm_id,
+                "label": label,
+                "size": size,
+                "top_nodes": top_nodes,
+                "files": files,
+            })
+
+        return {
+            "total_communities": total_communities,
+            "showing": len(communities_out),
+            "communities": communities_out,
+        }
+    finally:
+        conn.close()
+
+
+# What it does: Reads bridge node scores from SQLite and returns a ranked list.
+# Input: repo path, and how many top bridge nodes to return (default 20).
+# Output: list of nodes ranked by betweenness centrality score, with name/type/file.
+def read_bridge_nodes(repo_path: str, top_n: int = 20) -> dict:
+    conn = _connect(repo_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) AS cnt FROM bridge_nodes").fetchone()["cnt"]
+        if count == 0:
+            return {
+                "error": "No bridge nodes built yet. Call get_bridge_nodes to compute them first."
+            }
+
+        rows = conn.execute("""
+            SELECT b.node_id, b.score, n.type, n.props
+            FROM bridge_nodes b
+            JOIN nodes n ON n.id = b.node_id
+            ORDER BY b.score DESC
+            LIMIT ?
+        """, (top_n,)).fetchall()
+
+        nodes_out = []
+        for r in rows:
+            props = json.loads(r["props"])
+            nodes_out.append({
+                "name": props.get("name") or r["node_id"],
+                "type": r["type"],
+                "file_path": props.get("file_path"),
+                "betweenness_score": round(r["score"], 4),
+            })
+
+        return {
+            "total_bridge_nodes": count,
+            "showing": len(nodes_out),
+            "bridge_nodes": nodes_out,
+        }
+    finally:
+        conn.close()
+
+
+# What it does: Detects isolated nodes and untested hotspots, persists to knowledge_gaps table.
+# Input: repo path, degree threshold above which a hub node is considered a hotspot (default 5).
+# Output: summary dict with counts of each gap type found.
+def build_knowledge_gaps(repo_path: str, hotspot_degree: int = 5) -> dict:
+    conn = _connect(repo_path)
+    _bootstrap(conn)
+    try:
+        node_rows = conn.execute(
+            "SELECT id, type, props FROM nodes WHERE type IN ('File','Class','Function','Method')"
+        ).fetchall()
+
+        if not node_rows:
+            return {"error": "No nodes found. Run build_python_code_ontology first."}
+
+        conn.execute("DELETE FROM knowledge_gaps")
+        gaps = []
+
+        for r in node_rows:
+            node_id = r["id"]
+            props = json.loads(r["props"])
+            name = props.get("name") or node_id
+            file_path = props.get("file_path")
+
+            degree = conn.execute("""
+                SELECT COUNT(*) AS cnt FROM edges
+                WHERE source_id = ? OR target_id = ?
+            """, (node_id, node_id)).fetchone()["cnt"]
+
+            # Gap type 1: isolated — no edges at all
+            if degree == 0:
+                gaps.append((
+                    node_id,
+                    "isolated",
+                    json.dumps({"name": name, "type": r["type"], "file_path": file_path}),
+                ))
+                continue
+
+            # Gap type 2: untested hotspot — high degree but no test_* callers
+            if degree >= hotspot_degree:
+                test_callers = conn.execute("""
+                    SELECT COUNT(*) AS cnt FROM edges e
+                    JOIN nodes n ON n.id = e.source_id
+                    WHERE e.target_id = ?
+                      AND e.rel_type = 'CALLS'
+                      AND (
+                        json_extract(n.props, '$.name') LIKE 'test_%'
+                        OR json_extract(n.props, '$.file_path') LIKE '%test%'
+                      )
+                """, (node_id,)).fetchone()["cnt"]
+
+                if test_callers == 0:
+                    gaps.append((
+                        node_id,
+                        "untested_hotspot",
+                        json.dumps({
+                            "name": name,
+                            "type": r["type"],
+                            "file_path": file_path,
+                            "degree": degree,
+                        }),
+                    ))
+
+        conn.executemany(
+            "INSERT OR REPLACE INTO knowledge_gaps(node_id, gap_type, detail) VALUES (?, ?, ?)",
+            gaps,
+        )
+        conn.commit()
+
+        isolated_count = sum(1 for g in gaps if g[1] == "isolated")
+        hotspot_count = sum(1 for g in gaps if g[1] == "untested_hotspot")
+
+        return {
+            "status": "built",
+            "total_nodes_scanned": len(node_rows),
+            "isolated": isolated_count,
+            "untested_hotspots": hotspot_count,
+            "total_gaps": len(gaps),
+        }
+    finally:
+        conn.close()
+
+
+# What it does: Reads knowledge gaps from SQLite and returns them grouped by type.
+# Input: repo path, optional filters for gap types to include.
+# Output: dict with isolated nodes and untested hotspots lists.
+def read_knowledge_gaps(repo_path: str) -> dict:
+    conn = _connect(repo_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) AS cnt FROM knowledge_gaps").fetchone()["cnt"]
+        if count == 0:
+            return {
+                "error": "No knowledge gaps built yet. Call get_knowledge_gaps to compute them first."
+            }
+
+        rows = conn.execute("""
+            SELECT node_id, gap_type, detail
+            FROM knowledge_gaps
+            ORDER BY gap_type, node_id
+        """).fetchall()
+
+        isolated = []
+        untested_hotspots = []
+
+        for r in rows:
+            detail = json.loads(r["detail"])
+            if r["gap_type"] == "isolated":
+                isolated.append(detail)
+            elif r["gap_type"] == "untested_hotspot":
+                untested_hotspots.append(detail)
+
+        # Sort hotspots by degree descending
+        untested_hotspots.sort(key=lambda x: x.get("degree", 0), reverse=True)
+
+        return {
+            "total_gaps": count,
+            "isolated": {
+                "count": len(isolated),
+                "nodes": isolated,
+            },
+            "untested_hotspots": {
+                "count": len(untested_hotspots),
+                "nodes": untested_hotspots,
+            },
         }
     finally:
         conn.close()

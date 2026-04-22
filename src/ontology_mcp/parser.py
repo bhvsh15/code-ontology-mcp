@@ -636,11 +636,9 @@ def _process_function(
         # Class → Method
         graph.add_edge(Edge(parent_id, "CONTAINS", fn_id))
 
-    elif parent_id == file_id:
-        # File → Function (only top-level)
+    else:
+        # File → top-level Function, or outer Function → inner Function
         graph.add_edge(Edge(parent_id, "DEFINES", fn_id))
-
-    # ❌ No relation for nested functions (correct by design)
 
     symbol_index.setdefault(fn_node.name, []).append((fn_id, node_type))
 

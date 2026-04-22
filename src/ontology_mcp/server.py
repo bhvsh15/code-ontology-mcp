@@ -39,6 +39,9 @@ from ontology_mcp.tools.hub_nodes import get_hub_nodes as get_hub_nodes_impl
 from ontology_mcp.tools.large_functions import get_large_functions as get_large_functions_impl
 from ontology_mcp.tools.traverse import get_traverse as get_traverse_impl
 from ontology_mcp.tools.detect_changes import get_detect_changes as get_detect_changes_impl
+from ontology_mcp.tools.communities import get_list_communities as get_list_communities_impl
+from ontology_mcp.tools.bridge_nodes import get_bridge_nodes as get_bridge_nodes_impl
+from ontology_mcp.tools.knowledge_gaps import get_knowledge_gaps as get_knowledge_gaps_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -130,6 +133,76 @@ def detect_changes(repo_path: str, depth: int = 3) -> dict:
         depth:     How many CALLS hops to follow (default 3).
     """
     return get_detect_changes_impl(repo_path=repo_path, depth=depth)
+
+
+# ---------------------------------------------------------------------------
+# Community detection
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def list_communities(repo_path: str, top_n: int = 20) -> dict:
+    """
+    Detect and return the natural clusters in the codebase.
+
+    Uses the Louvain algorithm on CALLS / DEFINES / IMPORTS / EXTENDS edges
+    to group symbols into communities that maximise internal density.
+    Each community gets an auto-generated label and a list of its top nodes.
+
+    Use this to understand the architectural layers of a codebase or to find
+    files that are tightly coupled.
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+        top_n:     How many communities to return, largest first (default 20).
+    """
+    return get_list_communities_impl(repo_path=repo_path, top_n=top_n)
+
+
+# ---------------------------------------------------------------------------
+# Bridge nodes
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_bridge_nodes(repo_path: str, top_n: int = 20) -> dict:
+    """
+    Find architectural chokepoints in the codebase using betweenness centrality.
+
+    A bridge node scores high if it lies on many shortest paths between other
+    nodes — removing it would disconnect the graph the most. These are the
+    files or functions that glue different parts of the codebase together.
+
+    Use this to understand:
+      - Which symbols are the most critical connectors across modules?
+      - Where would a change have the widest blast radius?
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+        top_n:     How many bridge nodes to return, highest score first (default 20).
+    """
+    return get_bridge_nodes_impl(repo_path=repo_path, top_n=top_n)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge gaps
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_knowledge_gaps(repo_path: str, hotspot_degree: int = 5) -> dict:
+    """
+    Find weak spots in the codebase — isolated nodes and untested hotspots.
+
+    Detects two types of knowledge gaps:
+      - isolated:          symbols with zero edges (dead code, orphaned files)
+      - untested_hotspot:  high-traffic nodes (degree >= hotspot_degree) with
+                           no test_* callers — critical code with no test coverage
+
+    Use this to prioritise testing efforts or find dead code to clean up.
+
+    Args:
+        repo_path:       Absolute path to the repo on disk.
+        hotspot_degree:  Minimum degree to qualify as a hotspot (default 5).
+    """
+    return get_knowledge_gaps_impl(repo_path=repo_path, hotspot_degree=hotspot_degree)
 
 
 # ---------------------------------------------------------------------------
