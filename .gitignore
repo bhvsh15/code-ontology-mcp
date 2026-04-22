@@ -3,3 +3,6 @@ sh.pub
 .env
 mcp-config.json
 .ontology-mcp/
+*.egg-info/
+__pycache__/
+*.pyc

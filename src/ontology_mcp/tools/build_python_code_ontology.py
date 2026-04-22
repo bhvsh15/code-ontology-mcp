@@ -25,7 +25,7 @@ from pathlib import Path
 from ontology_mcp.model import Edge, Node, OntologyGraph
 from ontology_mcp.parser import parse_python_files
 from ontology_mcp.scanner import scan_files
-from ontology_mcp.sqlite_store import write_graph
+from ontology_mcp.sqlite_store import write_graph, read_file_hashes, write_file_hashes
 from ontology_mcp.ts_parser import EXT_TO_LANG, parse_file as ts_parse_file
 
 
@@ -148,7 +148,22 @@ def build_python_code_ontology(
         languages=languages,
     )
 
-    graph = _build_graph(repo_path=scan.repo_path, files=scan.files)
+    # --- Incremental build: skip files whose content hasn't changed ---
+    stored_hashes = {} if reset_graph else read_file_hashes(scan.repo_path)
+    new_hashes: dict[str, str] = {}
+    files_to_parse: list[str] = []
+    files_skipped = 0
+
+    for file_path in scan.files:
+        rel = Path(file_path).relative_to(scan.repo_path).as_posix()
+        current_hash = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
+        new_hashes[rel] = current_hash
+        if stored_hashes.get(rel) == current_hash:
+            files_skipped += 1
+        else:
+            files_to_parse.append(file_path)
+
+    graph = _build_graph(repo_path=scan.repo_path, files=files_to_parse)
 
     node_counts = Counter(node.type for node in graph.nodes.values())
     rel_counts = Counter(edge.rel_type for edge in graph.edges)
@@ -158,12 +173,15 @@ def build_python_code_ontology(
 
     if not dry_run:
         write_summary = write_graph(graph, repo_path=scan.repo_path, reset=reset_graph)
+        write_file_hashes(scan.repo_path, new_hashes)
         store_status = "written"
 
     return {
         "status": "completed" if not dry_run else "dry_run_completed",
         "repo_path": scan.repo_path,
         "files_scanned": len(scan.files),
+        "files_parsed": len(files_to_parse),
+        "files_skipped": files_skipped,
         "languages_found": scan.languages_found,
         "sample_files": scan.files[:20],
         "excluded_dirs": scan.excluded_dirs,

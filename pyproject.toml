@@ -10,6 +10,7 @@ requires-python = ">=3.9"
 dependencies = [
   "fastmcp>=2.0.0",
   "tree-sitter-language-pack>=0.3.0",
+  "networkx>=3.2",
 ]
 
 [tool.setuptools]

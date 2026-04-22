@@ -92,6 +92,10 @@ def _bootstrap(conn: sqlite3.Connection) -> None:
             target_id TEXT NOT NULL,
             props     TEXT NOT NULL DEFAULT '{}'
         );
+        CREATE TABLE IF NOT EXISTS file_hashes (
+            path TEXT PRIMARY KEY,
+            hash TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_edges_source  ON edges(source_id);
         CREATE INDEX IF NOT EXISTS idx_edges_target  ON edges(target_id);
         CREATE INDEX IF NOT EXISTS idx_edges_rel     ON edges(rel_type);
@@ -506,11 +510,11 @@ def read_blast_radius(
             return _blast_empty(repo_path, changed_file_paths,
                                 warnings[0] if warnings else "No file nodes found.")
 
-        # Symbols in changed files
+        # Symbols in changed files — use placeholder-based IN clause
         fph = _placeholders(file_ids)
         changed_sym_rows = conn.execute(f"""
             WITH RECURSIVE defined(id) AS (
-                SELECT unnested.id FROM (VALUES {','.join(f'({repr(i)})' for i in file_ids)}) AS unnested(id)
+                SELECT id FROM nodes WHERE id IN ({fph})
                 UNION ALL
                 SELECT e.target_id FROM edges e
                 JOIN defined d ON e.source_id = d.id
@@ -519,7 +523,7 @@ def read_blast_radius(
             SELECT n.id, n.type, n.props FROM nodes n
             JOIN defined d ON n.id = d.id
             WHERE n.type IN ('Function','Method','Class')
-        """).fetchall()
+        """, file_ids).fetchall()
 
         changed_syms = [_sym_row(r) for r in changed_sym_rows]
         changed_sym_ids = [s["id"] for s in changed_syms]
@@ -735,5 +739,285 @@ def read_hub_nodes(repo_path: str, top_n: int = 10, node_types: list[str] | None
             }
             for row in rows
         ]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Read: large functions — functions exceeding a line count threshold
+# ---------------------------------------------------------------------------
+
+# What it does: Finds functions and methods that are longer than a given number of lines.
+# Input: repo path, minimum number of lines to flag (default 50), and which types to check.
+# Output: a list of oversized symbols sorted from largest to smallest, with file and line info.
+# Why it matters: large functions are harder to test, review, and maintain.
+def read_large_functions(
+    repo_path: str,
+    min_lines: int = 50,
+    node_types: list[str] | None = None,
+) -> list[dict]:
+    types = node_types or ["Function", "Method"]
+    placeholders = ",".join(f"'{t}'" for t in types)
+
+    conn = _connect(repo_path)
+    try:
+        rows = conn.execute(f"""
+            SELECT
+                json_extract(props, '$.name')      AS name,
+                json_extract(props, '$.qualname')  AS qualname,
+                json_extract(props, '$.file_path') AS file_path,
+                json_extract(props, '$.lineno')    AS line_start,
+                json_extract(props, '$.line_end')  AS line_end,
+                json_extract(props, '$.line_end') - json_extract(props, '$.lineno') AS size,
+                type
+            FROM nodes
+            WHERE type IN ({placeholders})
+              AND json_extract(props, '$.line_end') IS NOT NULL
+              AND (json_extract(props, '$.line_end') - json_extract(props, '$.lineno')) >= ?
+            ORDER BY size DESC
+        """, (min_lines,)).fetchall()
+
+        return [
+            {
+                "name":       row["name"],
+                "qualname":   row["qualname"],
+                "type":       row["type"],
+                "file_path":  row["file_path"],
+                "line_start": row["line_start"],
+                "line_end":   row["line_end"],
+                "size":       row["size"],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Read: traverse graph — BFS from any node following any edge types
+# ---------------------------------------------------------------------------
+
+# What it does: Starts from a named node and walks outward through the graph,
+# following the edge types you choose, up to a set number of hops.
+# Input: repo path, starting node name, which edge types to follow,
+#        direction (out/in/both), and max depth.
+# Output: all nodes and edges reachable from the start within the given depth.
+# Why it matters: more flexible than query_call_chain — works across any edge type,
+#                 not just CALLS.
+def read_traverse(
+    repo_path: str,
+    start: str,
+    edge_types: list[str] | None = None,
+    direction: str = "out",
+    depth: int = 2,
+) -> dict:
+    depth = min(max(depth, 1), 5)
+    edges_to_follow = edge_types or ["CALLS", "DEFINES", "IMPORTS", "EXTENDS"]
+    et_clause = ",".join(f"'{e}'" for e in edges_to_follow)
+
+    conn = _connect(repo_path)
+    try:
+        # Find the starting node by name
+        start_row = conn.execute(
+            "SELECT id, type, props FROM nodes WHERE json_extract(props, '$.name') = ? LIMIT 1",
+            (start,),
+        ).fetchone()
+
+        if not start_row:
+            return {"error": f"No node named '{start}' found in the graph."}
+
+        start_node = _row_to_node(start_row)
+        visited: set[str] = {start_row["id"]}
+        frontier: list[str] = [start_row["id"]]
+        all_nodes: list[dict] = [start_node]
+        all_edges: list[dict] = []
+
+        for _ in range(depth):
+            if not frontier:
+                break
+
+            ph = _placeholders(frontier)
+
+            # Outbound: nodes this frontier points to
+            if direction in ("out", "both"):
+                rows = conn.execute(f"""
+                    SELECT e.source_id, e.rel_type, e.target_id, e.props,
+                           n.id, n.type, n.props AS nprops
+                    FROM edges e JOIN nodes n ON n.id = e.target_id
+                    WHERE e.source_id IN ({ph}) AND e.rel_type IN ({et_clause})
+                """, frontier).fetchall()
+                for r in rows:
+                    all_edges.append({
+                        "source_id": r["source_id"],
+                        "rel_type":  r["rel_type"],
+                        "target_id": r["target_id"],
+                    })
+                    if r["id"] not in visited:
+                        visited.add(r["id"])
+                        frontier.append(r["id"])
+                        all_nodes.append(_row_to_node(
+                            conn.execute("SELECT id, type, props FROM nodes WHERE id=?", (r["id"],)).fetchone()
+                        ))
+
+            # Inbound: nodes that point to this frontier
+            if direction in ("in", "both"):
+                rows = conn.execute(f"""
+                    SELECT e.source_id, e.rel_type, e.target_id, e.props,
+                           n.id, n.type, n.props AS nprops
+                    FROM edges e JOIN nodes n ON n.id = e.source_id
+                    WHERE e.target_id IN ({ph}) AND e.rel_type IN ({et_clause})
+                """, frontier).fetchall()
+                for r in rows:
+                    all_edges.append({
+                        "source_id": r["source_id"],
+                        "rel_type":  r["rel_type"],
+                        "target_id": r["target_id"],
+                    })
+                    if r["id"] not in visited:
+                        visited.add(r["id"])
+                        frontier.append(r["id"])
+                        all_nodes.append(_row_to_node(
+                            conn.execute("SELECT id, type, props FROM nodes WHERE id=?", (r["id"],)).fetchone()
+                        ))
+
+        return {
+            "start": start,
+            "edge_types": edges_to_follow,
+            "direction": direction,
+            "depth": depth,
+            "total_nodes": len(all_nodes),
+            "total_edges": len(all_edges),
+            "nodes": all_nodes,
+            "edges": all_edges,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# File hashes — used for incremental builds
+# ---------------------------------------------------------------------------
+
+# What it does: Returns all stored file hashes from the last build.
+# Input: repo path.
+# Output: a dict mapping repo-relative file path → its SHA-256 hash.
+def read_file_hashes(repo_path: str) -> dict[str, str]:
+    if not db_path(repo_path).exists():
+        return {}
+    conn = _connect(repo_path)
+    try:
+        rows = conn.execute("SELECT path, hash FROM file_hashes").fetchall()
+        return {r["path"]: r["hash"] for r in rows}
+    finally:
+        conn.close()
+
+
+# What it does: Saves file hashes into the database after a build,
+# so the next build can compare and skip unchanged files.
+# Input: repo path, and a dict mapping file paths to their hashes.
+# Output: nothing — saves as a side effect.
+def write_file_hashes(repo_path: str, hashes: dict[str, str]) -> None:
+    conn = _connect(repo_path)
+    _bootstrap(conn)
+    try:
+        for path, hash_val in hashes.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO file_hashes(path, hash) VALUES (?, ?)",
+                (path, hash_val),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Read: detect changes — risk-scored impact report for changed files
+# ---------------------------------------------------------------------------
+
+# What it does: Given a list of changed files, returns every affected symbol
+# with a risk score, dependent count, and whether it has test coverage.
+# Risk score is 0.0 (low risk) to 1.0 (high risk).
+# Input: repo path, list of changed file paths, and traversal depth.
+# Output: prioritised list of symbols to review, sorted by risk score.
+def read_detect_changes(
+    repo_path: str,
+    changed_file_paths: list[str],
+    depth: int = 3,
+) -> dict:
+    if not changed_file_paths:
+        return {
+            "changed_files": [],
+            "report": [],
+            "total_symbols": 0,
+            "warnings": ["No changed files provided."],
+        }
+
+    # Step 1: get blast radius to find changed + affected symbols
+    blast = read_blast_radius(repo_path, changed_file_paths, depth)
+
+    all_symbols = blast["changed_symbols"] + blast["affected_symbols"]
+    if not all_symbols:
+        return {
+            "changed_files": blast["changed_files"],
+            "report": [],
+            "total_symbols": 0,
+            "warnings": blast.get("warnings", []),
+        }
+
+    sym_ids = [s["id"] for s in all_symbols]
+    ph = _placeholders(sym_ids)
+
+    conn = _connect(repo_path)
+    try:
+        # For each symbol: count dependents + check test coverage
+        rows = conn.execute(f"""
+            SELECT
+                n.id,
+                COUNT(DISTINCT callers.source_id) AS dependent_count,
+                SUM(CASE WHEN json_extract(caller_node.props, '$.name') LIKE 'test_%'
+                    THEN 1 ELSE 0 END) AS test_count
+            FROM nodes n
+            LEFT JOIN edges callers     ON callers.target_id = n.id AND callers.rel_type = 'CALLS'
+            LEFT JOIN nodes caller_node ON caller_node.id = callers.source_id
+            WHERE n.id IN ({ph})
+            GROUP BY n.id
+        """, sym_ids).fetchall()
+
+        # Build lookup by id
+        stats = {r["id"]: r for r in rows}
+
+        report = []
+        for sym in all_symbols:
+            s = stats.get(sym["id"])
+            dependent_count = s["dependent_count"] if s else 0
+            has_test = (s["test_count"] > 0) if s else False
+            is_changed = sym in blast["changed_symbols"]
+
+            # Risk = dependents / 5 capped at 0.7, plus 0.3 if no test coverage
+            risk = min(1.0, round(
+                min(dependent_count / 5, 0.7) + (0.3 if not has_test else 0.0),
+                2
+            ))
+
+            report.append({
+                "name":            sym["name"],
+                "qualname":        sym["qualname"],
+                "type":            sym["type"],
+                "file_path":       sym["file_path"],
+                "changed_directly": is_changed,
+                "dependent_count": dependent_count,
+                "has_test":        has_test,
+                "risk_score":      risk,
+            })
+
+        # Sort by risk score descending
+        report.sort(key=lambda x: x["risk_score"], reverse=True)
+
+        return {
+            "changed_files":  blast["changed_files"],
+            "total_symbols":  len(report),
+            "report":         report,
+            "warnings":       blast.get("warnings", []),
+        }
     finally:
         conn.close()

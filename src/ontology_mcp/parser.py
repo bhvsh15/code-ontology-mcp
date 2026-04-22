@@ -625,6 +625,7 @@ def _process_function(
             "qualname": qualname,
             "file_path": rel,
             "lineno": fn_node.lineno,
+            "line_end": fn_node.end_lineno,
             "is_async": is_async,
             "decorators": ", ".join(decorator_names) if decorator_names else None,
         },

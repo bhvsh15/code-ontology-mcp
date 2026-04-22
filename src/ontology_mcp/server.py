@@ -36,14 +36,15 @@ from ontology_mcp.tools.context_tools import (
 )
 from ontology_mcp.tools.blast_radius import get_blast_radius as get_blast_radius_impl
 from ontology_mcp.tools.hub_nodes import get_hub_nodes as get_hub_nodes_impl
+from ontology_mcp.tools.large_functions import get_large_functions as get_large_functions_impl
+from ontology_mcp.tools.traverse import get_traverse as get_traverse_impl
+from ontology_mcp.tools.detect_changes import get_detect_changes as get_detect_changes_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
 from ontology_mcp.tools.query_graph import (
     query_graph_overview as query_graph_overview_impl,
-    query_folder as query_folder_impl,
-    query_file as query_file_impl,
-    query_symbol as query_symbol_impl,
+    query as query_impl,
     query_call_chain as query_call_chain_impl,
 )
 
@@ -111,6 +112,27 @@ def get_changed_files(repo_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Detect changes
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def detect_changes(repo_path: str, depth: int = 3) -> dict:
+    """
+    Primary code-review tool. Auto-detects git changes and returns a
+    risk-scored report of every symbol that needs review.
+
+    Each symbol gets a risk score (0.0–1.0) based on:
+    - How many other symbols depend on it
+    - Whether it has any test coverage
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+        depth:     How many CALLS hops to follow (default 3).
+    """
+    return get_detect_changes_impl(repo_path=repo_path, depth=depth)
+
+
+# ---------------------------------------------------------------------------
 # Hub nodes
 # ---------------------------------------------------------------------------
 
@@ -137,6 +159,73 @@ def get_hub_nodes(
         get_hub_nodes(repo_path="...", node_types=["Class"], top_n=5)
     """
     return get_hub_nodes_impl(repo_path=repo_path, top_n=top_n, node_types=node_types)
+
+
+# ---------------------------------------------------------------------------
+# Large functions
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def find_large_functions(
+    repo_path: str,
+    min_lines: int = 50,
+    node_types: list[str] | None = None,
+) -> dict:
+    """
+    Find functions and methods that exceed a given line count.
+
+    Large functions are harder to read, test, and maintain.
+    Use this to identify refactoring candidates.
+
+    Args:
+        repo_path:   Absolute path to the repo on disk.
+        min_lines:   Minimum lines to flag (default 50).
+        node_types:  Filter by "Function", "Method", or both (default both).
+
+    Examples:
+        find_large_functions(repo_path="...", min_lines=100)
+        find_large_functions(repo_path="...", min_lines=30, node_types=["Method"])
+    """
+    return get_large_functions_impl(repo_path=repo_path, min_lines=min_lines, node_types=node_types)
+
+
+# ---------------------------------------------------------------------------
+# Traverse graph
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def traverse_graph(
+    repo_path: str,
+    start: str,
+    edge_types: list[str] | None = None,
+    direction: str = "out",
+    depth: int = 2,
+) -> dict:
+    """
+    Start from any named node and walk the graph outward following chosen edge types.
+
+    More flexible than query_call_chain — works across any edge type,
+    not just function calls.
+
+    Args:
+        repo_path:   Absolute path to the repo on disk.
+        start:       Name of the node to start from (e.g. "login", "auth_routes.py").
+        edge_types:  Edges to follow. Options: CALLS, DEFINES, IMPORTS, EXTENDS, CONTAINS.
+                     Defaults to CALLS + DEFINES + IMPORTS + EXTENDS.
+        direction:   "out" (default), "in", or "both".
+        depth:       How many hops to walk, 1–5 (default 2).
+
+    Examples:
+        traverse_graph(repo_path="...", start="login", edge_types=["CALLS"])
+        traverse_graph(repo_path="...", start="schema.py", edge_types=["DEFINES"], direction="out")
+    """
+    return get_traverse_impl(
+        repo_path=repo_path,
+        start=start,
+        edge_types=edge_types,
+        direction=direction,
+        depth=depth,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,52 +326,32 @@ def query_graph_overview(repo_path: str, auto_build: bool = False) -> dict:
 
 
 @mcp.tool
-def query_folder(repo_path: str, folder_path: str, auto_build: bool = False) -> dict:
-    """
-    Load the full subgraph for a specific folder within the repository.
-
-    Args:
-        repo_path:   Absolute path to the repo on disk.
-        folder_path: Repo-relative path to the folder, e.g. "src/utils".
-        auto_build:  Build the graph first if it is missing.
-    """
-    return query_folder_impl(repo_path=repo_path, folder_path=folder_path, auto_build=auto_build)
-
-
-@mcp.tool
-def query_file(repo_path: str, file_path: str, auto_build: bool = False) -> dict:
-    """
-    Load the subgraph for a single file: the file node, all symbols it defines,
-    and any cross-file CALLS/EXTENDS edges.
-
-    Args:
-        repo_path:  Absolute path to the repo on disk.
-        file_path:  Repo-relative path to the file, e.g. "src/utils/helpers.py".
-        auto_build: Build the graph first if it is missing.
-    """
-    return query_file_impl(repo_path=repo_path, file_path=file_path, auto_build=auto_build)
-
-
-@mcp.tool
-def query_symbol(
+def query(
     repo_path: str,
-    symbol_name: str,
+    mode: str,
+    target: str,
     symbol_type: str | None = None,
     auto_build: bool = False,
 ) -> dict:
     """
-    Find a class, function, or method by name and return it with its
-    immediate (1-hop) relationships.
+    Single query tool for looking up a file, folder, or symbol in the graph.
 
     Args:
         repo_path:   Absolute path to the repo on disk.
-        symbol_name: Exact name of the symbol (e.g. "parse_python_files").
-        symbol_type: Optional filter — "Class", "Function", or "Method".
+        mode:        What to look up — "file", "folder", or "symbol".
+        target:      The path or name to query.
+        symbol_type: Only for mode="symbol" — filter by "Class", "Function", or "Method".
         auto_build:  Build the graph first if it is missing.
+
+    Examples:
+        query(repo_path, mode="file",   target="backend/auth/auth_routes.py")
+        query(repo_path, mode="folder", target="backend/routes")
+        query(repo_path, mode="symbol", target="login", symbol_type="Function")
     """
-    return query_symbol_impl(
+    return query_impl(
         repo_path=repo_path,
-        symbol_name=symbol_name,
+        mode=mode,
+        target=target,
         symbol_type=symbol_type,
         auto_build=auto_build,
     )
