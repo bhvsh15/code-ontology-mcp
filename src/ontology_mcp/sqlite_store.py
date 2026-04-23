@@ -1413,6 +1413,432 @@ def read_flows(repo_path: str, top_n: int = 20) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Circular dependency detection
+# ---------------------------------------------------------------------------
+
+# What it does: Builds a directed graph of IMPORTS edges between files and detects cycles.
+# Input: repo path.
+# Output: list of cycles, each as an ordered list of file paths forming the circle.
+def find_circular_dependencies(repo_path: str) -> dict:
+    try:
+        import networkx as nx
+    except ImportError:
+        return {"error": "networkx is not installed. Run: pip install networkx"}
+
+    conn = _connect(repo_path)
+    try:
+        # Build file-level import graph
+        file_rows = conn.execute(
+            "SELECT id, props FROM nodes WHERE type = 'File'"
+        ).fetchall()
+
+        if not file_rows:
+            return {"error": "No nodes found. Run build_python_code_ontology first."}
+
+        id_to_path = {
+            r["id"]: json.loads(r["props"]).get("path", r["id"])
+            for r in file_rows
+        }
+        file_ids = set(id_to_path)
+
+        G = nx.DiGraph()
+        G.add_nodes_from(file_ids)
+
+        import_rows = conn.execute(
+            "SELECT source_id, target_id FROM edges WHERE rel_type = 'IMPORTS'"
+        ).fetchall()
+        for r in import_rows:
+            if r["source_id"] in file_ids and r["target_id"] in file_ids:
+                G.add_edge(r["source_id"], r["target_id"])
+
+        cycles = list(nx.simple_cycles(G))
+
+        # Convert node IDs to file paths and sort for stable output
+        cycles_out = []
+        for cycle in cycles:
+            paths = [id_to_path.get(nid, nid) for nid in cycle]
+            paths.append(paths[0])  # close the loop
+            cycles_out.append(paths)
+
+        cycles_out.sort(key=lambda c: (len(c), c[0]))
+
+        return {
+            "total_cycles": len(cycles_out),
+            "cycles": cycles_out,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Add location — where to put new code
+# ---------------------------------------------------------------------------
+
+# What it does: Given symbols a new function will interact with, suggests which file to put it in.
+# Input: repo path, list of symbol names the new function will call or be called by.
+# Output: suggested file + reasoning (community vote breakdown).
+def get_add_location(repo_path: str, symbols: list[str]) -> dict:
+    conn = _connect(repo_path)
+    try:
+        file_votes: dict[str, int] = {}
+        community_votes: dict[int, int] = {}
+        resolved: list[dict] = []
+        unresolved: list[str] = []
+
+        for name in symbols:
+            rows = conn.execute("""
+                SELECT n.id, n.type, n.props
+                FROM nodes n
+                WHERE json_extract(n.props, '$.name') = ?
+                  AND n.type IN ('Function', 'Method', 'Class')
+            """, (name,)).fetchall()
+
+            if not rows:
+                unresolved.append(name)
+                continue
+
+            # Pick the first match (most specific — if multiple, take non-test file)
+            chosen = rows[0]
+            for r in rows:
+                fp = json.loads(r["props"]).get("file_path", "")
+                if "test" not in fp:
+                    chosen = r
+                    break
+
+            props = json.loads(chosen["props"])
+            file_path = props.get("file_path", "")
+
+            # Community lookup
+            comm_row = conn.execute(
+                "SELECT community_id FROM communities WHERE node_id = ?", (chosen["id"],)
+            ).fetchone()
+            community_id = comm_row["community_id"] if comm_row else None
+
+            file_votes[file_path] = file_votes.get(file_path, 0) + 1
+            if community_id is not None:
+                community_votes[community_id] = community_votes.get(community_id, 0) + 1
+
+            resolved.append({
+                "symbol": name,
+                "file_path": file_path,
+                "community_id": community_id,
+            })
+
+        if not resolved:
+            return {
+                "error": "None of the given symbols were found in the graph.",
+                "unresolved": unresolved,
+            }
+
+        # Best file = most votes
+        best_file = max(file_votes, key=lambda f: file_votes[f])
+        best_community = max(community_votes, key=lambda c: community_votes[c]) if community_votes else None
+
+        # Get other files in the same community as alternatives
+        alternatives = []
+        if best_community is not None:
+            alt_rows = conn.execute("""
+                SELECT DISTINCT json_extract(n.props, '$.path') AS path
+                FROM communities c
+                JOIN nodes n ON n.id = c.node_id
+                WHERE c.community_id = ?
+                  AND n.type = 'File'
+                  AND json_extract(n.props, '$.path') != ?
+                LIMIT 5
+            """, (best_community, best_file)).fetchall()
+            alternatives = [r["path"] for r in alt_rows if r["path"]]
+
+        return {
+            "suggested_file": best_file,
+            "confidence": file_votes[best_file] / len(symbols),
+            "reasoning": {
+                "symbols_resolved": len(resolved),
+                "symbols_unresolved": unresolved,
+                "file_votes": file_votes,
+                "dominant_community": best_community,
+            },
+            "alternative_files": alternatives,
+            "symbol_breakdown": resolved,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Similar implementations — structural pattern matching
+# ---------------------------------------------------------------------------
+
+# What it does: Given a list of callee names, finds existing functions that call
+# those same symbols — ranked by overlap count (how many callees they share).
+# Input: repo path, list of callee names the new function will call, max results.
+# Output: ranked list of existing functions with their overlap score and matched callees.
+def find_similar_implementations(
+    repo_path: str,
+    callees: list[str],
+    top_n: int = 10,
+) -> dict:
+    conn = _connect(repo_path)
+    try:
+        # Resolve callee names to node IDs
+        target_ids: set[str] = set()
+        resolved_callees: dict[str, str] = {}  # name → node_id
+
+        for name in callees:
+            rows = conn.execute("""
+                SELECT id FROM nodes
+                WHERE json_extract(props, '$.name') = ?
+                  AND type IN ('Function', 'Method')
+            """, (name,)).fetchall()
+            for r in rows:
+                target_ids.add(r["id"])
+                resolved_callees[name] = r["id"]
+
+        if not target_ids:
+            return {
+                "error": "None of the given callee names were found in the graph.",
+                "callees": callees,
+                "matches": [],
+            }
+
+        # Find all functions that call ANY of the target callees
+        placeholders = ",".join("?" * len(target_ids))
+        caller_rows = conn.execute(f"""
+            SELECT DISTINCT e.source_id, e.target_id
+            FROM edges e
+            WHERE e.rel_type = 'CALLS'
+              AND e.target_id IN ({placeholders})
+              AND e.source_id != e.target_id
+        """, list(target_ids)).fetchall()
+
+        # Count overlap per caller
+        caller_matches: dict[str, set[str]] = {}
+        for r in caller_rows:
+            src = r["source_id"]
+            caller_matches.setdefault(src, set()).add(r["target_id"])
+
+        if not caller_matches:
+            return {
+                "callees": callees,
+                "matches": [],
+                "note": "No existing functions call any of the given callees.",
+            }
+
+        # Score and rank
+        results = []
+        for caller_id, matched_ids in caller_matches.items():
+            node = conn.execute(
+                "SELECT type, props FROM nodes WHERE id = ?", (caller_id,)
+            ).fetchone()
+            if not node:
+                continue
+            props = json.loads(node["props"])
+
+            # Map matched IDs back to callee names
+            matched_names = [
+                name for name, nid in resolved_callees.items()
+                if nid in matched_ids
+            ]
+
+            results.append({
+                "name": props.get("name", caller_id),
+                "type": node["type"],
+                "file_path": props.get("file_path"),
+                "qualname": props.get("qualname"),
+                "lineno": props.get("lineno"),
+                "line_end": props.get("line_end"),
+                "overlap": len(matched_ids),
+                "overlap_score": round(len(matched_ids) / len(target_ids), 2),
+                "matched_callees": matched_names,
+            })
+
+        results.sort(key=lambda x: x["overlap"], reverse=True)
+
+        return {
+            "callees_searched": callees,
+            "total_matches": len(results),
+            "showing": min(len(results), top_n),
+            "matches": results[:top_n],
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Vulnerability surface — unprotected entry points
+# ---------------------------------------------------------------------------
+
+_DEFAULT_AUTH_PATTERNS = frozenset({
+    "auth", "login", "require", "role", "permission", "token",
+    "verify", "validate", "authenticate", "authorize", "jwt",
+    "oauth", "session", "credential", "identity", "guard",
+})
+
+# What it does: Scans all stored flows and returns entry points with no auth
+# function in their call chain.
+# Input: repo path, optional custom auth keyword list.
+# Output: unprotected entry points + protected ones for comparison.
+def get_vulnerability_surface(
+    repo_path: str,
+    auth_keywords: list[str] | None = None,
+) -> dict:
+    conn = _connect(repo_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) AS cnt FROM flows").fetchone()["cnt"]
+        if count == 0:
+            return {
+                "error": "No flows found. Run list_flows first to detect entry points."
+            }
+
+        keywords = frozenset(auth_keywords) if auth_keywords else _DEFAULT_AUTH_PATTERNS
+
+        rows = conn.execute("""
+            SELECT f.entry_id, f.path, n.props
+            FROM flows f
+            JOIN nodes n ON n.id = f.entry_id
+        """).fetchall()
+
+        unprotected = []
+        protected = []
+
+        for r in rows:
+            props = json.loads(r["props"])
+            entry_name = props.get("name", r["entry_id"])
+            entry_file = props.get("file_path")
+            path = json.loads(r["path"])
+
+            # Check if any node in the path matches an auth pattern
+            auth_hits = []
+            for node in path:
+                name_lower = node.get("name", "").lower()
+                if any(kw in name_lower for kw in keywords):
+                    auth_hits.append(node["name"])
+
+            entry_info = {
+                "entry_point": entry_name,
+                "file_path": entry_file,
+                "path_length": len(path),
+            }
+
+            if auth_hits:
+                protected.append({**entry_info, "auth_functions": auth_hits})
+            else:
+                unprotected.append(entry_info)
+
+        return {
+            "total_entry_points": len(rows),
+            "unprotected_count": len(unprotected),
+            "protected_count": len(protected),
+            "auth_keywords_used": sorted(keywords),
+            "unprotected": unprotected,
+            "protected": protected,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Context window pack — batched multi-symbol lookup
+# ---------------------------------------------------------------------------
+
+# What it does: Resolves multiple symbol names in one call and returns their nodes,
+# internal edges (between the given symbols), and external 1-hop neighbors.
+# Input: repo path, list of symbol names.
+# Output: compact subgraph — symbols + edges + community memberships.
+def get_context_window_pack(repo_path: str, symbols: list[str]) -> dict:
+    conn = _connect(repo_path)
+    try:
+        # Resolve all symbol names to node IDs
+        resolved_nodes: dict[str, dict] = {}  # node_id → node info
+        unresolved: list[str] = []
+
+        for name in symbols:
+            rows = conn.execute("""
+                SELECT id, type, props FROM nodes
+                WHERE json_extract(props, '$.name') = ?
+                  AND type IN ('Function', 'Method', 'Class', 'File')
+            """, (name,)).fetchall()
+
+            if not rows:
+                unresolved.append(name)
+                continue
+
+            for r in rows:
+                props = json.loads(r["props"])
+                resolved_nodes[r["id"]] = {
+                    "id": r["id"],
+                    "name": props.get("name", name),
+                    "type": r["type"],
+                    "file_path": props.get("file_path"),
+                    "qualname": props.get("qualname"),
+                    "lineno": props.get("lineno"),
+                    "line_end": props.get("line_end"),
+                }
+
+        if not resolved_nodes:
+            return {"error": "None of the given symbols were found.", "unresolved": unresolved}
+
+        node_id_set = set(resolved_nodes)
+
+        # Fetch all edges touching any of the resolved nodes
+        placeholders = ",".join("?" * len(node_id_set))
+        edge_rows = conn.execute(f"""
+            SELECT source_id, target_id, rel_type FROM edges
+            WHERE source_id IN ({placeholders})
+               OR target_id IN ({placeholders})
+        """, list(node_id_set) * 2).fetchall()
+
+        internal_edges = []
+        external_node_ids: set[str] = set()
+
+        for r in edge_rows:
+            src, dst, rel = r["source_id"], r["target_id"], r["rel_type"]
+            if src in node_id_set and dst in node_id_set:
+                internal_edges.append({"src": resolved_nodes[src]["name"],
+                                       "dst": resolved_nodes[dst]["name"],
+                                       "rel": rel})
+            else:
+                external_node_ids.add(dst if src in node_id_set else src)
+
+        # Resolve external neighbors (1-hop)
+        external_neighbors = []
+        if external_node_ids:
+            ext_placeholders = ",".join("?" * len(external_node_ids))
+            ext_rows = conn.execute(f"""
+                SELECT id, type, props FROM nodes
+                WHERE id IN ({ext_placeholders})
+                  AND type IN ('Function', 'Method', 'Class', 'File')
+            """, list(external_node_ids)).fetchall()
+            for r in ext_rows:
+                props = json.loads(r["props"])
+                external_neighbors.append({
+                    "name": props.get("name", r["id"]),
+                    "type": r["type"],
+                    "file_path": props.get("file_path"),
+                })
+
+        # Community membership for each resolved node
+        community_map: dict[str, int] = {}
+        for nid in node_id_set:
+            comm_row = conn.execute(
+                "SELECT community_id FROM communities WHERE node_id = ?", (nid,)
+            ).fetchone()
+            if comm_row:
+                community_map[resolved_nodes[nid]["name"]] = comm_row["community_id"]
+
+        return {
+            "symbols_requested": symbols,
+            "symbols_resolved": len(resolved_nodes),
+            "unresolved": unresolved,
+            "nodes": list(resolved_nodes.values()),
+            "internal_edges": internal_edges,
+            "external_neighbors": external_neighbors,
+            "community_membership": community_map,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Symbol resolution — context-aware disambiguation
 # ---------------------------------------------------------------------------
 

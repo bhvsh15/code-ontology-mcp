@@ -45,6 +45,11 @@ from ontology_mcp.tools.knowledge_gaps import get_knowledge_gaps as get_knowledg
 from ontology_mcp.tools.architecture_overview import get_architecture_overview as get_architecture_overview_impl
 from ontology_mcp.tools.flows import get_list_flows as get_list_flows_impl
 from ontology_mcp.tools.resolve_symbol import get_resolve_symbol as get_resolve_symbol_impl
+from ontology_mcp.tools.circular_dependencies import get_circular_dependencies as get_circular_dependencies_impl
+from ontology_mcp.tools.add_location import get_add_location as get_add_location_impl
+from ontology_mcp.tools.similar_implementations import get_similar_implementations as get_similar_implementations_impl
+from ontology_mcp.tools.vulnerability_surface import get_vulnerability_surface as get_vulnerability_surface_impl
+from ontology_mcp.tools.context_window_pack import get_context_window_pack as get_context_window_pack_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -311,6 +316,135 @@ def resolve_symbol(
         current_file=current_file,
         symbol_type=symbol_type,
     )
+
+
+# ---------------------------------------------------------------------------
+# Circular dependencies
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def find_circular_dependencies(repo_path: str) -> dict:
+    """
+    Detect all circular import chains in the codebase.
+
+    Runs cycle detection on the IMPORTS graph and returns every cycle as an
+    ordered list of file paths showing exactly which files form the circle.
+
+    Use this before refactoring modules, or when debugging ImportError caused
+    by circular imports. The agent cannot derive this through reasoning alone.
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+    """
+    return get_circular_dependencies_impl(repo_path=repo_path)
+
+
+# ---------------------------------------------------------------------------
+# Add location
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_add_location(repo_path: str, symbols: list[str]) -> dict:
+    """
+    Suggest the best file to add a new function to, based on community membership
+    of the symbols it will interact with.
+
+    Pass the names of functions/classes the new code will call or be called by.
+    Returns the file where most of those symbols live, with a confidence score
+    and alternative options.
+
+    Use this before writing new code to avoid putting it in the wrong module.
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+        symbols:   Names of symbols the new function will call or interact with.
+                   Example: ["hash_password", "create_access_token", "login"]
+    """
+    return get_add_location_impl(repo_path=repo_path, symbols=symbols)
+
+
+# ---------------------------------------------------------------------------
+# Similar implementations
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def find_similar_implementations(
+    repo_path: str,
+    callees: list[str],
+    top_n: int = 10,
+) -> dict:
+    """
+    Find existing functions that share the same call pattern as the one you are
+    about to write — ranked by overlap score.
+
+    Pass the names of functions/symbols the new code will call. Returns existing
+    functions that already call those same symbols, so the agent can copy a real
+    pattern instead of hallucinating an implementation.
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+        callees:   Names of symbols the new function will call.
+                   Example: ["hash_password", "create_access_token"]
+        top_n:     How many matches to return (default 10).
+    """
+    return get_similar_implementations_impl(
+        repo_path=repo_path,
+        callees=callees,
+        top_n=top_n,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Vulnerability surface
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_vulnerability_surface(
+    repo_path: str,
+    auth_keywords: list[str] | None = None,
+) -> dict:
+    """
+    Find entry points with no auth function in their call chain.
+
+    Scans all stored flows and flags entry points (route handlers, CLI commands,
+    etc.) where no function matching auth patterns appears in the execution path.
+
+    Default auth patterns checked: auth, login, require, role, permission,
+    token, verify, validate, authenticate, authorize, jwt, oauth, session,
+    credential, identity, guard.
+
+    Run list_flows first to ensure entry points are up to date.
+
+    Args:
+        repo_path:      Absolute path to the repo on disk.
+        auth_keywords:  Override the default auth keyword list.
+    """
+    return get_vulnerability_surface_impl(
+        repo_path=repo_path,
+        auth_keywords=auth_keywords,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Context window pack
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_context_window_pack(repo_path: str, symbols: list[str]) -> dict:
+    """
+    Batch lookup for multiple symbols in one call — returns their nodes,
+    internal relationships, and external 1-hop neighbors as a single subgraph.
+
+    Use this instead of calling query(mode="symbol") N times when working on
+    a task that touches multiple known symbols. Saves N-1 round trips and
+    returns a deduplicated, merged view of all their relationships.
+
+    Args:
+        repo_path: Absolute path to the repo on disk.
+        symbols:   List of symbol names to look up together.
+                   Example: ["login", "verify_password", "require_roles"]
+    """
+    return get_context_window_pack_impl(repo_path=repo_path, symbols=symbols)
 
 
 # ---------------------------------------------------------------------------
