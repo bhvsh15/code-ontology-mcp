@@ -30,7 +30,7 @@ MCP server that indexes code repos into a local SQLite graph and exposes analysi
 | B4 · `get_architecture_overview` | done |
 | B5 · `list_flows` | done |
 
-### Phase 3 — Not started
+### Phase 3 — All done ✅
 | ID | Tool | Agent problem it solves |
 |----|------|------------------------|
 | C1 | `resolve_symbol` | Sees same name in N files — returns only the relevant match using import chain from current file context. Replaces N file reads. |
