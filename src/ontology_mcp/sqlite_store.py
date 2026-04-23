@@ -1413,6 +1413,133 @@ def read_flows(repo_path: str, top_n: int = 20) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Symbol resolution — context-aware disambiguation
+# ---------------------------------------------------------------------------
+
+# What it does: Given a symbol name and the file the agent is currently working in,
+# returns the most relevant match using the import chain.
+# Input: repo path, symbol name, current file (repo-relative path), optional type filter.
+# Output: ranked list of candidates — import-resolved match first, then same-community, then rest.
+def resolve_symbol(
+    repo_path: str,
+    symbol_name: str,
+    current_file: str,
+    symbol_type: str | None = None,
+) -> dict:
+    conn = _connect(repo_path)
+    try:
+        # Find all nodes matching the symbol name
+        type_filter = ""
+        params: list = [symbol_name]
+        if symbol_type:
+            type_filter = "AND n.type = ?"
+            params.append(symbol_type)
+
+        candidates = conn.execute(f"""
+            SELECT n.id, n.type, n.props
+            FROM nodes n
+            WHERE json_extract(n.props, '$.name') = ?
+              AND n.type IN ('Function', 'Method', 'Class')
+              {type_filter}
+        """, params).fetchall()
+
+        if not candidates:
+            return {"symbol_name": symbol_name, "candidates": [], "resolved": None}
+
+        if len(candidates) == 1:
+            props = json.loads(candidates[0]["props"])
+            return {
+                "symbol_name": symbol_name,
+                "resolved": {
+                    "name": props.get("name"),
+                    "type": candidates[0]["type"],
+                    "file_path": props.get("file_path"),
+                    "qualname": props.get("qualname"),
+                    "lineno": props.get("lineno"),
+                    "confidence": "only_match",
+                },
+                "candidates": [],
+            }
+
+        # Find files that current_file imports (direct IMPORTS edges)
+        imported_files = set()
+        current_file_row = conn.execute("""
+            SELECT n.id FROM nodes n
+            WHERE n.type = 'File'
+              AND json_extract(n.props, '$.path') = ?
+        """, (current_file,)).fetchone()
+
+        if current_file_row:
+            imp_rows = conn.execute("""
+                SELECT json_extract(n.props, '$.path') AS path
+                FROM edges e
+                JOIN nodes n ON n.id = e.target_id
+                WHERE e.source_id = ?
+                  AND e.rel_type = 'IMPORTS'
+                  AND n.type = 'File'
+            """, (current_file_row["id"],)).fetchall()
+            imported_files = {r["path"] for r in imp_rows if r["path"]}
+
+        # Find community of current file
+        current_community = None
+        if current_file_row:
+            comm_row = conn.execute("""
+                SELECT community_id FROM communities WHERE node_id = ?
+            """, (current_file_row["id"],)).fetchone()
+            if comm_row:
+                current_community = comm_row["community_id"]
+
+        # Rank candidates
+        ranked = []
+        for c in candidates:
+            props = json.loads(c["props"])
+            file_path = props.get("file_path") or ""
+
+            # Check community match
+            comm_row = conn.execute(
+                "SELECT community_id FROM communities WHERE node_id = ?", (c["id"],)
+            ).fetchone()
+            candidate_community = comm_row["community_id"] if comm_row else None
+
+            # Determine confidence
+            if file_path == current_file:
+                confidence = "same_file"
+                rank = 0
+            elif file_path in imported_files:
+                confidence = "import_resolved"
+                rank = 1
+            elif candidate_community is not None and candidate_community == current_community:
+                confidence = "same_community"
+                rank = 2
+            else:
+                confidence = "other"
+                rank = 3
+
+            ranked.append({
+                "rank": rank,
+                "name": props.get("name"),
+                "type": c["type"],
+                "file_path": file_path,
+                "qualname": props.get("qualname"),
+                "lineno": props.get("lineno"),
+                "confidence": confidence,
+            })
+
+        ranked.sort(key=lambda x: x["rank"])
+        for r in ranked:
+            del r["rank"]
+
+        return {
+            "symbol_name": symbol_name,
+            "current_file": current_file,
+            "resolved": ranked[0],
+            "candidates": ranked[1:],
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # File hashes — used for incremental builds
 # ---------------------------------------------------------------------------
 

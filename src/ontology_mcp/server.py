@@ -44,6 +44,7 @@ from ontology_mcp.tools.bridge_nodes import get_bridge_nodes as get_bridge_nodes
 from ontology_mcp.tools.knowledge_gaps import get_knowledge_gaps as get_knowledge_gaps_impl
 from ontology_mcp.tools.architecture_overview import get_architecture_overview as get_architecture_overview_impl
 from ontology_mcp.tools.flows import get_list_flows as get_list_flows_impl
+from ontology_mcp.tools.resolve_symbol import get_resolve_symbol as get_resolve_symbol_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -273,6 +274,42 @@ def list_flows(
         max_depth=max_depth,
         max_entries=max_entries,
         top_n=top_n,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resolve symbol
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def resolve_symbol(
+    repo_path: str,
+    symbol_name: str,
+    current_file: str,
+    symbol_type: str | None = None,
+) -> dict:
+    """
+    Resolve a symbol name to its most likely definition given the file the agent
+    is currently editing — without reading multiple files.
+
+    Uses the import chain from current_file to determine which definition of the
+    symbol is actually in scope. Returns a confidence level with each candidate:
+      - import_resolved:  the symbol lives in a file current_file directly imports
+      - same_community:   the symbol lives in the same architectural cluster
+      - other:            no import relationship found
+
+    Args:
+        repo_path:    Absolute path to the repo on disk.
+        symbol_name:  The name to resolve (e.g. "get_db", "UserSchema").
+        current_file: Repo-relative path of the file being edited
+                      (e.g. "backend/auth/auth_routes.py").
+        symbol_type:  Optional filter — "Function", "Method", or "Class".
+    """
+    return get_resolve_symbol_impl(
+        repo_path=repo_path,
+        symbol_name=symbol_name,
+        current_file=current_file,
+        symbol_type=symbol_type,
     )
 
 
