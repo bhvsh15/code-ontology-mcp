@@ -30,6 +30,16 @@ MCP server that indexes code repos into a local SQLite graph and exposes analysi
 | B4 · `get_architecture_overview` | done |
 | B5 · `list_flows` | done |
 
+### Phase 3 — Not started
+| ID | Tool | Agent problem it solves |
+|----|------|------------------------|
+| C1 | `resolve_symbol` | Sees same name in N files — returns only the relevant match using import chain from current file context. Replaces N file reads. |
+| C2 | `find_circular_dependencies` | `nx.find_cycle()` on IMPORTS graph. Returns exact cycle chains. Agent cannot do this through reasoning alone. |
+| C3 | `get_add_location` | "I need to add a function that calls A and B" — returns the right file based on community membership. Saves full codebase scan. |
+| C4 | `find_similar_implementations` | Given callees needed, finds existing functions with same structural call pattern. Agent copies real code instead of hallucinating. |
+| C5 | `get_vulnerability_surface` | Scans all flows for entry points with no auth function in call chain. Would take O(n) manual tool calls otherwise. |
+| C6 | `get_context_window_pack` | Given a list of symbols the agent is working with, returns all their relationships in one batched call. Replaces N separate `query` calls. |
+
 ### Parser fix — nested functions ✅
 Inner/nested functions (e.g. `role_checker` inside `require_roles`) now get a
 `DEFINES` edge from their parent function. Previously they had 0 edges and
