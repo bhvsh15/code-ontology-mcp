@@ -51,6 +51,7 @@ from ontology_mcp.tools.similar_implementations import get_similar_implementatio
 from ontology_mcp.tools.vulnerability_surface import get_vulnerability_surface as get_vulnerability_surface_impl
 from ontology_mcp.tools.context_window_pack import get_context_window_pack as get_context_window_pack_impl
 from ontology_mcp.tools.build_from_url import build_from_github_url as build_from_github_url_impl
+from ontology_mcp.git_clone import get_local_path as get_local_path_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -649,6 +650,31 @@ def build_from_github_url(
         exclude_globs=exclude_globs,
         dry_run=dry_run,
     )
+
+
+@mcp.tool
+def get_repo_path(github_url: str) -> dict:
+    """
+    Resolve a GitHub URL to its local path on disk.
+
+    Use this after build_from_github_url to get the repo_path required
+    by all other tools — without having to remember it from the build response.
+
+    Args:
+        github_url: Public GitHub URL (e.g. https://github.com/user/repo).
+    """
+    try:
+        local_path = get_local_path_impl(github_url)
+        from pathlib import Path
+        exists = Path(local_path).exists()
+        return {
+            "github_url": github_url,
+            "local_path": local_path,
+            "exists": exists,
+            "note": None if exists else "Repo not cloned yet. Run build_from_github_url first.",
+        }
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------

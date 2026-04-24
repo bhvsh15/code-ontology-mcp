@@ -27,6 +27,12 @@ def _to_https(github_url: str) -> str:
     return github_url
 
 
+def get_local_path(github_url: str) -> str:
+    """Return the local path for a GitHub URL without cloning."""
+    slug = _repo_slug(github_url)
+    return str(_REPOS_DIR / slug)
+
+
 def clone_or_pull(github_url: str) -> tuple[str, str]:
     """
     Clone the repo if it doesn't exist locally, otherwise git pull.
