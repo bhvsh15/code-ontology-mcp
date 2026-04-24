@@ -6,3 +6,5 @@ mcp-config.json
 *.egg-info/
 __pycache__/
 *.pyc
+.venv/
+.DS_Store
