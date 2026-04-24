@@ -50,6 +50,7 @@ from ontology_mcp.tools.add_location import get_add_location as get_add_location
 from ontology_mcp.tools.similar_implementations import get_similar_implementations as get_similar_implementations_impl
 from ontology_mcp.tools.vulnerability_surface import get_vulnerability_surface as get_vulnerability_surface_impl
 from ontology_mcp.tools.context_window_pack import get_context_window_pack as get_context_window_pack_impl
+from ontology_mcp.tools.build_from_url import build_from_github_url as build_from_github_url_impl
 from ontology_mcp.tools.build_python_code_ontology import (
     build_python_code_ontology as build_python_code_ontology_impl,
 )
@@ -619,6 +620,33 @@ def build_python_code_ontology(
         include_globs=include_globs,
         exclude_globs=exclude_globs,
         reset_graph=reset_graph,
+        dry_run=dry_run,
+    )
+
+
+@mcp.tool
+def build_from_github_url(
+    github_url: str,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Clone a public GitHub repo and build its ontology graph in one call.
+
+    If the repo was already cloned previously, runs git pull to update it
+    before rebuilding. Repos are stored at ~/.ontology-mcp/repos/.
+
+    Args:
+        github_url:    Public GitHub URL (e.g. https://github.com/user/repo).
+        include_globs: Optional file glob patterns to include.
+        exclude_globs: Optional file glob patterns to exclude.
+        dry_run:       If true, parses but does not write to the database.
+    """
+    return build_from_github_url_impl(
+        github_url=github_url,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
         dry_run=dry_run,
     )
 
